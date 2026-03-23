@@ -1,5 +1,7 @@
 python-telegram-bot==22.7
 anthropic
+openai
 gspread
 google-auth
-openai
+requests
+beautifulsoup4

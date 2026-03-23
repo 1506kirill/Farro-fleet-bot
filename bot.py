@@ -19,7 +19,8 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-from gspread_formatting import format_cell_range, CellFormat, Color
+from gspread.utils import rowcol_to_a1
+from gspread_formatting import format_cell_range, CellFormat, Color, TextFormat
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -154,10 +155,7 @@ def full_plate_from_short(car_id: str | None) -> str:
 
 
 def build_known_cars_block() -> str:
-    lines = []
-    for short_id in KNOWN_CAR_IDS:
-        lines.append(f"{short_id} -> {VEHICLE_MAP[short_id]}")
-    return "\n".join(lines)
+    return "\n".join(f"{k} -> {VEHICLE_MAP[k]}" for k in KNOWN_CAR_IDS)
 
 
 def is_to_phrase(text: str) -> bool:
@@ -170,6 +168,15 @@ def is_to_phrase(text: str) -> bool:
         or t.startswith("то ")
         or t.endswith(" то")
     )
+
+
+def detect_special_text_type(text: str) -> str | None:
+    t = str(text or "").lower().strip()
+    if t.startswith("долг") or " долг " in f" {t} ":
+        return "debt"
+    if t.startswith("штраф") or " штраф " in f" {t} ":
+        return "fine"
+    return None
 
 
 def build_prompt(message: str, existing_data: dict | None = None) -> str:
@@ -208,18 +215,23 @@ def build_prompt(message: str, existing_data: dict | None = None) -> str:
 12. odometer только число или null.
 13. Если пользователь пишет "ТО" или "плановое ТО", description верни как "ТО".
 14. Если пользователь пишет "ТО" или "плановое ТО", amount может быть null, потому что это пакет фиксированных позиций.
-15. Приход может иметь описание, но оно не обязательно.
+15. Если пользователь пишет "долг" или "штраф", type верни как "debt" или "fine".
+16. Для "debt" и "fine" odometer не нужен.
+17. Для "debt" и "fine" description должна быть на русском языке и содержать причину: например "телевизор", "превышение", "мойка", "опоздание".
+18. Для "income" description может быть пустым.
 
 Распознавай тип операции по словам:
 - income: приход, доход, пришло, заработок, оплата, выручка
 - expense: расход, витрата, купил, ремонт, заправка, масло, колодки, запчасти, страховка, шины, ТО
+- debt: долг, задолженность
+- fine: штраф
 
 Сообщение пользователя:
 "{message}"
 
 Верни JSON строго такого вида:
 {{
-  "type": "expense" или "income" или null,
+  "type": "expense" или "income" или "debt" или "fine" или null,
   "car_id": "8730" или null,
   "date": "DD.MM.YY",
   "amount": 370,
@@ -231,14 +243,14 @@ def build_prompt(message: str, existing_data: dict | None = None) -> str:
 
 Если данных не хватает, верни:
 {{
-  "type": "expense" или "income" или null,
+  "type": "expense" или "income" или "debt" или "fine" или null,
   "car_id": "8730" или null,
   "date": "DD.MM.YY",
   "amount": null,
   "description": null,
   "odometer": null,
   "notes": null,
-  "missing_fields": ["amount", "odometer", "description"]
+  "missing_fields": ["amount", "description"]
 }}
 """
 
@@ -302,7 +314,12 @@ def ask_ai(message: str, existing_data: dict | None = None) -> dict:
     return {"error": "Не задані CLAUDE_API_KEY і OPENAI_API_KEY"}
 
 
-def apply_to_special_case(data: dict, raw_text: str) -> dict:
+def apply_special_cases(data: dict, raw_text: str) -> dict:
+    special_type = detect_special_text_type(raw_text)
+
+    if special_type and not data.get("type"):
+        data["type"] = special_type
+
     if is_to_phrase(raw_text):
         if not data.get("type"):
             data["type"] = "expense"
@@ -310,30 +327,32 @@ def apply_to_special_case(data: dict, raw_text: str) -> dict:
             data["description"] = "ТО"
         if data.get("amount") in ("", None):
             data["amount"] = 0
+
     return data
 
 
 def compute_missing_fields(data: dict, raw_text: str = "") -> list[str]:
     missing = []
 
-    if not data.get("type"):
-        missing.append("type")
-    if not data.get("car_id"):
-        missing.append("car_id")
-
+    op_type = data.get("type")
     to_case = is_to_phrase(raw_text) or str(data.get("description", "")).lower().strip() in [
         "то",
         "плановое то",
         "планове то",
     ]
 
-    if not to_case and data.get("amount") in (None, ""):
+    if not op_type:
+        missing.append("type")
+    if not data.get("car_id"):
+        missing.append("car_id")
+
+    if data.get("amount") in (None, "") and not to_case:
         missing.append("amount")
 
-    if data.get("type") == "expense" and not data.get("description"):
+    if op_type in ["expense", "debt", "fine"] and not data.get("description"):
         missing.append("description")
 
-    if data.get("odometer") in (None, ""):
+    if op_type in ["expense", "income"] and data.get("odometer") in (None, ""):
         missing.append("odometer")
 
     return missing
@@ -350,7 +369,7 @@ def merge_data(old_data: dict, new_data: dict, raw_text: str = "") -> dict:
 
     merged["car_id"] = resolve_car_id(merged.get("car_id"))
     merged["date"] = normalize_date_short(merged.get("date"))
-    merged = apply_to_special_case(merged, raw_text)
+    merged = apply_special_cases(merged, raw_text)
     merged["missing_fields"] = compute_missing_fields(merged, raw_text)
     return merged
 
@@ -360,15 +379,13 @@ def ask_for_next_missing_field(missing_fields: list[str]) -> str:
         return "Уточни, будь ласка, відсутні дані."
 
     field = missing_fields[0]
-
     mapping = {
-        "type": "Вкажи, будь ласка, це прихід чи витрата.",
+        "type": "Вкажи, будь ласка, це прихід, витрата, борг чи штраф.",
         "car_id": f"Вкажи номер машини. Доступні: {', '.join(KNOWN_CAR_IDS)}",
         "amount": "Вкажи суму в гривнях.",
-        "description": "Вкажи назву витрати.",
+        "description": "Вкажи опис або причину.",
         "odometer": "Мені додати середньостатистичний пробіг? Напиши «так» або просто надішли цифри одометра.",
     }
-
     return mapping.get(field, "Уточни, будь ласка, відсутні дані.")
 
 
@@ -392,14 +409,10 @@ def get_usd_black_rate_dnipro() -> float | None:
             return float(m.group(1).replace(",", "."))
 
     matches = re.findall(r"\b([0-9]{2}[.,][0-9]{2})\b", text)
-    candidates = []
     for val in matches:
         num = float(val.replace(",", "."))
         if 35 <= num <= 50:
-            candidates.append(num)
-
-    if candidates:
-        return candidates[0]
+            return num
 
     return None
 
@@ -443,8 +456,8 @@ def get_last_odometer_stats(ws) -> tuple[int | None, int | None]:
         return None, None
 
     last_odo = odometers[-1]
-
     deltas = []
+
     for i in range(1, len(odometers)):
         delta = odometers[i] - odometers[i - 1]
         if 0 < delta <= 5000:
@@ -453,8 +466,7 @@ def get_last_odometer_stats(ws) -> tuple[int | None, int | None]:
     if deltas:
         recent = deltas[-5:]
         typical_delta = int(round(median(recent)))
-        estimated = last_odo + typical_delta
-        return last_odo, estimated
+        return last_odo, last_odo + typical_delta
 
     return last_odo, last_odo
 
@@ -464,14 +476,30 @@ def estimate_odometer_for_car(car_id: str) -> int | None:
     ws = get_matching_worksheet(spreadsheet, car_id)
     if not ws:
         return None
-
     _, estimated = get_last_odometer_stats(ws)
     return estimated
 
 
+def blue_text_format():
+    return CellFormat(
+        textFormat=TextFormat(
+            foregroundColor=Color(0, 0, 1)
+        )
+    )
+
+
+def yellow_fill_format():
+    return CellFormat(
+        backgroundColor=Color(1, 0.96, 0.75)
+    )
+
+
+def apply_blue_text(ws, cell_range: str):
+    format_cell_range(ws, cell_range, blue_text_format())
+
+
 def mark_cell_yellow(ws, cell_range: str):
-    fmt = CellFormat(backgroundColor=Color(1, 0.96, 0.75))
-    format_cell_range(ws, cell_range, fmt)
+    format_cell_range(ws, cell_range, yellow_fill_format())
 
 
 def get_next_expense_row(ws) -> int:
@@ -496,15 +524,18 @@ def get_next_expense_row(ws) -> int:
 
 
 def get_next_income_row(ws) -> int:
-    k_col_vals = ws.col_values(11)
-    next_row = len(k_col_vals) + 1
+    all_vals = ws.get_all_values()
+    start_row = 8
+    max_rows = max(len(all_vals), start_row + 200)
 
-    for i in range(7, len(k_col_vals)):
-        if not k_col_vals[i]:
-            next_row = i + 1
-            break
+    for row_idx in range(start_row, max_rows + 1):
+        row = all_vals[row_idx - 1] if row_idx - 1 < len(all_vals) else []
+        segment = row[10:30] if row else []
+        occupied = any(str(cell).strip() for cell in segment)
+        if not occupied:
+            return row_idx
 
-    return next_row
+    return max_rows + 1
 
 
 def get_previous_income_odometer(ws) -> int | None:
@@ -517,10 +548,26 @@ def get_previous_income_odometer(ws) -> int | None:
             if value:
                 odometers.append(value)
 
-    if not odometers:
-        return None
+    return odometers[-1] if odometers else None
 
-    return odometers[-1]
+
+def first_empty_col_after(ws, row_idx: int, start_col: int = 15, max_col: int = 40) -> int:
+    row = ws.row_values(row_idx)
+    for col in range(start_col, max_col + 1):
+        value = row[col - 1] if col - 1 < len(row) else ""
+        if not str(value).strip():
+            return col
+    return max_col + 1
+
+
+def build_debt_fine_text(op_type: str, date_value: str, description: str, amount: float) -> str:
+    desc = str(description or "").strip()
+    if desc and not desc.lower().startswith("за "):
+        desc = f"за {desc}"
+
+    amount_text = int(amount) if float(amount).is_integer() else amount
+    prefix = "долг" if op_type == "debt" else "штраф"
+    return f"{date_value} {prefix} {desc} {amount_text} грн".strip()
 
 
 def write_expense_rows(ws, date_value, odometer, items, usd_rate, notes, odometer_estimated):
@@ -543,14 +590,13 @@ def write_expense_rows(ws, date_value, odometer, items, usd_rate, notes, odomete
         current_row += 1
 
     end_row = start_row + len(rows) - 1
-    ws.update(f"E{start_row}:J{end_row}", rows)
+    update_range = f"E{start_row}:J{end_row}"
+    ws.update(update_range, rows)
+    apply_blue_text(ws, update_range)
 
     if odometer_estimated:
         for row_idx in range(start_row, end_row + 1):
-            try:
-                mark_cell_yellow(ws, f"F{row_idx}")
-            except Exception as e:
-                logger.error(f"Yellow mark error: {e}")
+            mark_cell_yellow(ws, f"F{row_idx}")
 
     total_amount = sum(float(x["amount"]) for x in items)
     return start_row, end_row, total_amount
@@ -567,6 +613,7 @@ def write_to_sheet(data: dict) -> str:
     description = data.get("description", "")
     notes = data.get("notes", None)
     odometer_estimated = bool(data.get("odometer_estimated", False))
+    op_type = data.get("type")
 
     usd_rate = None
     usd_note = ""
@@ -585,7 +632,7 @@ def write_to_sheet(data: dict) -> str:
 
     sheet_name = ws.title
 
-    if data["type"] == "expense":
+    if op_type == "expense":
         desc_lower = str(description).lower().strip()
         is_to_bundle_case = desc_lower in ["то", "плановое то", "планове то"] or is_to_phrase(description)
 
@@ -612,8 +659,9 @@ def write_to_sheet(data: dict) -> str:
         next_row = get_next_expense_row(ws)
         usd_amount = round(amount / usd_rate, 2) if usd_rate else ""
 
+        update_range = f"E{next_row}:J{next_row}"
         ws.update(
-            f"E{next_row}:J{next_row}",
+            update_range,
             [[
                 date_value,
                 odometer,
@@ -623,12 +671,10 @@ def write_to_sheet(data: dict) -> str:
                 notes or "",
             ]]
         )
+        apply_blue_text(ws, update_range)
 
         if odometer_estimated:
-            try:
-                mark_cell_yellow(ws, f"F{next_row}")
-            except Exception as e:
-                logger.error(f"Yellow mark error: {e}")
+            mark_cell_yellow(ws, f"F{next_row}")
 
         return (
             f"✅ Витрата внесена!\n"
@@ -640,7 +686,7 @@ def write_to_sheet(data: dict) -> str:
             f"{usd_note}"
         )
 
-    elif data["type"] == "income":
+    if op_type == "income":
         next_row = get_next_income_row(ws)
         usd_amount = round(amount / usd_rate, 2) if usd_rate else ""
         prev_odo = get_previous_income_odometer(ws)
@@ -652,8 +698,9 @@ def write_to_sheet(data: dict) -> str:
             except Exception:
                 mileage_delta = ""
 
+        update_range = f"K{next_row}:P{next_row}"
         ws.update(
-            f"K{next_row}:P{next_row}",
+            update_range,
             [[
                 date_value,
                 odometer,
@@ -663,12 +710,10 @@ def write_to_sheet(data: dict) -> str:
                 notes or "",
             ]]
         )
+        apply_blue_text(ws, update_range)
 
         if odometer_estimated:
-            try:
-                mark_cell_yellow(ws, f"L{next_row}")
-            except Exception as e:
-                logger.error(f"Yellow mark error: {e}")
+            mark_cell_yellow(ws, f"L{next_row}")
 
         delta_text = f"\n📈 Різниця пробігу: {mileage_delta}" if mileage_delta != "" else ""
 
@@ -681,6 +726,25 @@ def write_to_sheet(data: dict) -> str:
             f"📍 Внесено: лист '{sheet_name}', рядок {next_row}, стовпці K:P"
             f"{delta_text}"
             f"{usd_note}"
+        )
+
+    if op_type in ["debt", "fine"]:
+        next_row = get_next_income_row(ws)
+        target_col = first_empty_col_after(ws, next_row, start_col=15, max_col=40)
+        target_a1 = rowcol_to_a1(next_row, target_col)
+        note_text = build_debt_fine_text(op_type, date_value, description, amount)
+
+        ws.update(target_a1, [[note_text]])
+        apply_blue_text(ws, target_a1)
+
+        col_letter = re.sub(r"\d", "", target_a1)
+
+        label = "Борг" if op_type == "debt" else "Штраф"
+        return (
+            f"✅ {label} внесено!\n"
+            f"🚘 Машина: {full_plate}\n"
+            f"📝 {note_text}\n"
+            f"📍 Внесено: лист '{sheet_name}', рядок {next_row}, стовпець {col_letter}"
         )
 
     return "❌ Невідомий тип операції"
@@ -787,7 +851,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             parsed["car_id"] = resolve_car_id(parsed.get("car_id"))
             parsed["date"] = normalize_date_short(parsed.get("date"))
-            parsed = apply_to_special_case(parsed, text)
+            parsed = apply_special_cases(parsed, text)
             parsed["missing_fields"] = compute_missing_fields(parsed, text)
 
         logger.info(f"Parsed result: {parsed}")
@@ -841,7 +905,8 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• 8730 колодки Бош 370 грн одометр 470420\n"
         f"• 4553 приход 3800\n"
         f"• ТО 4553\n"
-        f"• плановое ТО 8730\n\n"
+        f"• штраф 4553 за перевищення 200 грн\n"
+        f"• долг 8730 за телевизор 4000 грн\n\n"
         f"Якщо не вистачить одометра — я або перепитаю, або підставлю середньостатистичний.",
         parse_mode="Markdown",
     )

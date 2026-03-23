@@ -35,7 +35,6 @@ ALLOWED_USERS = [int(x.strip()) for x in ALLOWED_USERS_STR.split(",") if x.strip
 
 MINFIN_URL = "https://minfin.com.ua/currency/auction/usd/buy/dnepropetrovsk/"
 
-# Полные номера машин
 FULL_PLATES = [
     "AI1457MM",
     "АЕ0418ОР",
@@ -65,8 +64,18 @@ FULL_PLATES = [
     "AI3531PH",
 ]
 
+TO_BUNDLE = [
+    {"description": "Масло в двигатель", "amount": 780},
+    {"description": "Воздушный фильтр WX WA9545", "amount": 270},
+    {"description": "Газовые фильтра", "amount": 100},
+    {"description": "Масляный фильтр BO 0451103318", "amount": 160},
+    {"description": "Работы за ТО", "amount": 300},
+]
+
+
 def extract_digits(value: str) -> str:
     return "".join(re.findall(r"\d+", str(value or "")))
+
 
 VEHICLE_MAP = {}
 for plate in FULL_PLATES:
@@ -131,7 +140,6 @@ def resolve_car_id(value: str | None) -> str | None:
     if digits in VEHICLE_MAP:
         return digits
 
-    # Если пользователь вдруг прислал полный номер
     for short_id, full_plate in VEHICLE_MAP.items():
         if raw == str(full_plate).upper():
             return short_id
@@ -175,7 +183,7 @@ def build_prompt(message: str, existing_data: dict | None = None) -> str:
 
 Правила:
 1. Пользователь может писать данные в любом порядке: машина, сумма, одометр, описание, дата, тип операции.
-2. Пользователь обычно пишет ТОЛЬКО ЦИФРЫ машины, например 4553 или 8730.
+2. Пользователь обычно пишет только цифры машины, например 4553 или 8730.
 3. car_id в JSON должен быть только из списка известных машин.
 4. Если распознал машину по цифрам, верни car_id только в виде цифр: "4553", "8730" и т.д.
 5. Если дата не указана — используй сегодняшнюю дату в формате DD.MM.YY.
@@ -184,13 +192,14 @@ def build_prompt(message: str, existing_data: dict | None = None) -> str:
 8. Если не хватает важных данных — верни missing_fields.
 9. Не выдумывай данные.
 10. Для расхода и прихода description обязательно на русском языке.
-11. category тоже должна быть на русском языке из списка ниже.
-12. amount всегда в гривне, только число.
-13. odometer только число или null.
+11. amount всегда в гривне, только число.
+12. odometer только число или null.
+13. Если пользователь пишет "ТО" или "плановое ТО", description верни как "ТО".
+14. Приход может иметь описание, но оно не обязательно.
 
 Распознавай тип операции по словам:
 - income: приход, доход, пришло, заработок, оплата, выручка
-- expense: расход, витрата, купил, ремонт, заправка, масло, колодки, запчасти, страховка, шины и т.д.
+- expense: расход, витрата, купил, ремонт, заправка, масло, колодки, запчасти, страховка, шины, ТО
 
 Сообщение пользователя:
 "{message}"
@@ -202,7 +211,6 @@ def build_prompt(message: str, existing_data: dict | None = None) -> str:
   "date": "DD.MM.YY",
   "amount": 370,
   "description": "Колодки Бош",
-  "category": "Тормоза",
   "odometer": 470420,
   "notes": null,
   "missing_fields": []
@@ -215,14 +223,10 @@ def build_prompt(message: str, existing_data: dict | None = None) -> str:
   "date": "DD.MM.YY",
   "amount": null,
   "description": null,
-  "category": "Прочее",
   "odometer": null,
   "notes": null,
   "missing_fields": ["amount", "odometer", "description"]
 }}
-
-Список category:
-"ТО|Тормоза|Подвеска/КПП|Двигатель|ГРМ/Охлаждение|Электрика|Шины|Кузов|Салон|GPS|ЗП|Страховка|Страховая выплата|Прочее"
 """
 
 
@@ -294,8 +298,10 @@ def compute_missing_fields(data: dict) -> list[str]:
         missing.append("car_id")
     if data.get("amount") in (None, ""):
         missing.append("amount")
-    if not data.get("description"):
+
+    if data.get("type") == "expense" and not data.get("description"):
         missing.append("description")
+
     if data.get("odometer") in (None, ""):
         missing.append("odometer")
 
@@ -327,8 +333,8 @@ def ask_for_next_missing_field(missing_fields: list[str]) -> str:
         "type": "Вкажи, будь ласка, це прихід чи витрата.",
         "car_id": f"Вкажи номер машини. Доступні: {', '.join(KNOWN_CAR_IDS)}",
         "amount": "Вкажи суму в гривнях.",
-        "description": "Вкажи назву приходу або витрати.",
-        "odometer": "Є показники одометра чи вивести статистичний пробіг? Напиши: «показники» або «статистичний».",
+        "description": "Вкажи назву витрати.",
+        "odometer": "Мені додати середньостатистичний пробіг? Напиши «так» або просто надішли цифри одометра.",
     }
 
     return mapping.get(field, "Уточни, будь ласка, відсутні дані.")
@@ -379,13 +385,22 @@ def parse_numeric_text(value) -> int | None:
         return None
 
 
+def get_matching_worksheet(spreadsheet, car_id: str):
+    full_plate = full_plate_from_short(car_id)
+    for ws in spreadsheet.worksheets():
+        title = str(ws.title)
+        if car_id in title or full_plate in title:
+            return ws
+    return None
+
+
 def get_last_odometer_stats(ws) -> tuple[int | None, int | None]:
     all_vals = ws.get_all_values()
     odometers = []
 
     for row in all_vals[7:]:
-        expense_odo = parse_numeric_text(row[5]) if len(row) > 5 else None   # F
-        income_odo = parse_numeric_text(row[11]) if len(row) > 11 else None  # L
+        expense_odo = parse_numeric_text(row[5]) if len(row) > 5 else None
+        income_odo = parse_numeric_text(row[11]) if len(row) > 11 else None
 
         if expense_odo:
             odometers.append(expense_odo)
@@ -414,27 +429,101 @@ def get_last_odometer_stats(ws) -> tuple[int | None, int | None]:
 
 def estimate_odometer_for_car(car_id: str) -> int | None:
     spreadsheet = get_sheet()
-    full_plate = full_plate_from_short(car_id)
-
-    target_ws = None
-    for ws in spreadsheet.worksheets():
-        title = str(ws.title)
-        if car_id in title or full_plate in title:
-            target_ws = ws
-            break
-
-    if not target_ws:
+    ws = get_matching_worksheet(spreadsheet, car_id)
+    if not ws:
         return None
 
-    _, estimated = get_last_odometer_stats(target_ws)
+    _, estimated = get_last_odometer_stats(ws)
     return estimated
 
 
 def mark_cell_yellow(ws, cell_range: str):
     fmt = CellFormat(
-        backgroundColor=Color(1, 0.96, 0.75)  # светло-желтый
+        backgroundColor=Color(1, 0.96, 0.75)
     )
     format_cell_range(ws, cell_range, fmt)
+
+
+def get_next_expense_row(ws) -> int:
+    all_vals = ws.get_all_values()
+    exp_start_row = 8
+
+    for i, row in enumerate(all_vals):
+        for j, cell in enumerate(row):
+            if "Дата" in str(cell) and j == 4:
+                exp_start_row = i + 2
+                break
+
+    e_col_vals = ws.col_values(5)
+    next_row = len(e_col_vals) + 1
+
+    for i in range(exp_start_row - 1, len(e_col_vals)):
+        if not e_col_vals[i]:
+            next_row = i + 1
+            break
+
+    return next_row
+
+
+def get_next_income_row(ws) -> int:
+    k_col_vals = ws.col_values(11)
+    next_row = len(k_col_vals) + 1
+
+    for i in range(7, len(k_col_vals)):
+        if not k_col_vals[i]:
+            next_row = i + 1
+            break
+
+    return next_row
+
+
+def get_previous_income_odometer(ws) -> int | None:
+    k_col_vals = ws.get_all_values()
+    odometers = []
+
+    for row in k_col_vals[7:]:
+        if len(row) > 11:
+            value = parse_numeric_text(row[11])
+            if value:
+                odometers.append(value)
+
+    if not odometers:
+        return None
+
+    return odometers[-1]
+
+
+def write_expense_rows(ws, date_value, odometer, items, usd_rate, notes, odometer_estimated):
+    start_row = get_next_expense_row(ws)
+    rows = []
+    current_row = start_row
+
+    for item in items:
+        amount = float(item["amount"])
+        usd_amount = round(amount / usd_rate, 2) if usd_rate else ""
+        note_value = notes if current_row == start_row else ""
+        rows.append([
+            date_value,               # E
+            odometer,                 # F
+            item["description"],      # G
+            amount,                   # H
+            usd_amount,               # I
+            note_value,               # J
+        ])
+        current_row += 1
+
+    end_row = start_row + len(rows) - 1
+    ws.update(f"E{start_row}:J{end_row}", rows)
+
+    if odometer_estimated:
+        for row_idx in range(start_row, end_row + 1):
+            try:
+                mark_cell_yellow(ws, f"F{row_idx}")
+            except Exception as e:
+                logger.error(f"Yellow mark error: {e}")
+
+    total_amount = sum(float(x["amount"]) for x in items)
+    return start_row, end_row, total_amount
 
 
 def write_to_sheet(data: dict) -> str:
@@ -446,54 +535,52 @@ def write_to_sheet(data: dict) -> str:
     amount = float(data.get("amount", 0) or 0)
     odometer = data.get("odometer", "")
     description = data.get("description", "")
-    category = data.get("category", "Прочее")
     notes = data.get("notes", None)
     odometer_estimated = bool(data.get("odometer_estimated", False))
 
     usd_rate = None
-    usd_amount = ""
     usd_note = ""
 
     try:
         usd_rate = get_usd_black_rate_dnipro()
         if usd_rate:
-            usd_amount = round(amount / usd_rate, 2)
             usd_note = f"\n💱 Курс USD: {usd_rate}"
     except Exception as e:
         logger.error(f"USD rate error: {e}")
         usd_note = "\n⚠️ Курс USD не вдалося отримати"
 
-    sheet_name = None
-    target_ws = None
-    for ws in spreadsheet.worksheets():
-        title = str(ws.title)
-        if car_id in title or full_plate in title:
-            sheet_name = title
-            target_ws = ws
-            break
-
-    if not target_ws:
+    ws = get_matching_worksheet(spreadsheet, car_id)
+    if not ws:
         return f"❌ Машину {full_plate} не знайдено в таблиці"
 
-    ws = target_ws
+    sheet_name = ws.title
 
     if data["type"] == "expense":
-        all_vals = ws.get_all_values()
-        exp_start_row = 8
+        desc_lower = str(description).lower().strip()
+        is_to_bundle = desc_lower in ["то", "плановое то", "планове то"] or "плановое то" in desc_lower
 
-        for i, row in enumerate(all_vals):
-            for j, cell in enumerate(row):
-                if "Дата" in str(cell) and j == 4:
-                    exp_start_row = i + 2
-                    break
+        if is_to_bundle:
+            start_row, end_row, total_amount = write_expense_rows(
+                ws=ws,
+                date_value=date_value,
+                odometer=odometer,
+                items=TO_BUNDLE,
+                usd_rate=usd_rate,
+                notes=notes,
+                odometer_estimated=odometer_estimated,
+            )
+            return (
+                f"✅ ТО внесено!\n"
+                f"🚘 Машина: {full_plate}\n"
+                f"🧾 Додано 5 рядків\n"
+                f"💸 Загальна сума: {total_amount} грн\n"
+                f"📅 {date_value}\n"
+                f"📍 Внесено: лист '{sheet_name}', рядки {start_row}-{end_row}, стовпці E:J"
+                f"{usd_note}"
+            )
 
-        e_col_vals = ws.col_values(5)
-        next_row = len(e_col_vals) + 1
-
-        for i in range(exp_start_row - 1, len(e_col_vals)):
-            if not e_col_vals[i]:
-                next_row = i + 1
-                break
+        next_row = get_next_expense_row(ws)
+        usd_amount = round(amount / usd_rate, 2) if usd_rate else ""
 
         ws.update(
             f"E{next_row}:J{next_row}",
@@ -503,15 +590,9 @@ def write_to_sheet(data: dict) -> str:
                 description,     # G
                 amount,          # H
                 usd_amount,      # I
-                category,        # J
+                notes or "",     # J
             ]]
         )
-
-        if notes:
-            try:
-                ws.update(f"K{next_row}", [[str(notes)]])
-            except Exception:
-                pass
 
         if odometer_estimated:
             try:
@@ -525,19 +606,21 @@ def write_to_sheet(data: dict) -> str:
             f"📋 {description}\n"
             f"💸 {amount} грн\n"
             f"📅 {date_value}\n"
-            f"📊 Категорія: {category}\n"
             f"📍 Внесено: лист '{sheet_name}', рядок {next_row}, стовпці E:J"
             f"{usd_note}"
         )
 
     elif data["type"] == "income":
-        k_col_vals = ws.col_values(11)
-        next_row = len(k_col_vals) + 1
+        next_row = get_next_income_row(ws)
+        usd_amount = round(amount / usd_rate, 2) if usd_rate else ""
+        prev_odo = get_previous_income_odometer(ws)
+        mileage_delta = ""
 
-        for i in range(7, len(k_col_vals)):
-            if not k_col_vals[i]:
-                next_row = i + 1
-                break
+        if prev_odo is not None and odometer not in ("", None):
+            try:
+                mileage_delta = int(odometer) - int(prev_odo)
+            except Exception:
+                mileage_delta = ""
 
         ws.update(
             f"K{next_row}:P{next_row}",
@@ -546,16 +629,10 @@ def write_to_sheet(data: dict) -> str:
                 odometer,        # L
                 amount,          # M
                 usd_amount,      # N
-                description,     # O
-                category,        # P
+                mileage_delta,   # O
+                notes or "",     # P
             ]]
         )
-
-        if notes:
-            try:
-                ws.update(f"Q{next_row}", [[str(notes)]])
-            except Exception:
-                pass
 
         if odometer_estimated:
             try:
@@ -563,28 +640,25 @@ def write_to_sheet(data: dict) -> str:
             except Exception as e:
                 logger.error(f"Yellow mark error: {e}")
 
+        delta_text = f"\n📈 Різниця пробігу: {mileage_delta}" if mileage_delta != "" else ""
+
         return (
             f"✅ Дохід внесено!\n"
             f"🚘 Машина: {full_plate}\n"
-            f"📋 {description}\n"
             f"💰 {amount} грн\n"
             f"📅 {date_value}\n"
             f"📍 Одометр: {odometer}\n"
             f"📍 Внесено: лист '{sheet_name}', рядок {next_row}, стовпці K:P"
+            f"{delta_text}"
             f"{usd_note}"
         )
 
     return "❌ Невідомий тип операції"
 
 
-def is_yes_for_exact_odometer(text: str) -> bool:
+def is_yes_statistical(text: str) -> bool:
     t = text.lower().strip()
-    return t in ["показники", "є показники", "є", "так", "yes"]
-
-
-def is_no_use_statistical(text: str) -> bool:
-    t = text.lower().strip()
-    return t in ["статистичний", "статистика", "ні", "нет", "no"]
+    return t in ["так", "да", "yes", "ок", "окей", "ага"]
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -598,41 +672,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Incoming message from {user_id}: {text}")
 
     try:
-        if context.user_data.get("waiting_exact_odometer"):
-            odometer_value = parse_numeric_text(text)
-            if not odometer_value:
-                await update.message.reply_text("Вкажи одометр одним числом.")
-                return
-
-            pending_data = context.user_data.get("pending_data", {})
-            pending_data["odometer"] = odometer_value
-            pending_data["odometer_estimated"] = False
-            pending_data["missing_fields"] = compute_missing_fields(pending_data)
-
-            context.user_data["pending_data"] = pending_data
-            context.user_data.pop("waiting_exact_odometer", None)
-
-            if pending_data["missing_fields"]:
-                await update.message.reply_text(
-                    ask_for_next_missing_field(pending_data["missing_fields"])
-                )
-                return
-
-            result = write_to_sheet(pending_data)
-            context.user_data.pop("pending_data", None)
-            await update.message.reply_text(result)
-            return
-
         if context.user_data.get("waiting_odometer_choice"):
             pending_data = context.user_data.get("pending_data", {})
 
-            if is_yes_for_exact_odometer(text):
-                context.user_data["waiting_exact_odometer"] = True
+            numeric_odo = parse_numeric_text(text)
+            if numeric_odo:
+                pending_data["odometer"] = numeric_odo
+                pending_data["odometer_estimated"] = False
+                pending_data["missing_fields"] = compute_missing_fields(pending_data)
+
+                context.user_data["pending_data"] = pending_data
                 context.user_data.pop("waiting_odometer_choice", None)
-                await update.message.reply_text("Вкажи одометр одним числом.")
+
+                if pending_data["missing_fields"]:
+                    await update.message.reply_text(
+                        ask_for_next_missing_field(pending_data["missing_fields"])
+                    )
+                    return
+
+                result = write_to_sheet(pending_data)
+                context.user_data.pop("pending_data", None)
+                await update.message.reply_text(result)
                 return
 
-            if is_no_use_statistical(text):
+            if is_yes_statistical(text):
                 car_id = pending_data.get("car_id")
                 if not car_id:
                     context.user_data.pop("waiting_odometer_choice", None)
@@ -641,10 +704,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 estimated = estimate_odometer_for_car(car_id)
                 if not estimated:
-                    context.user_data["waiting_exact_odometer"] = True
                     context.user_data.pop("waiting_odometer_choice", None)
                     await update.message.reply_text(
-                        "Не вдалося обчислити статистичний пробіг. Вкажи одометр одним числом."
+                        "Не вдалося обчислити середньостатистичний пробіг. Надішли, будь ласка, цифри одометра."
                     )
                     return
 
@@ -668,7 +730,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             await update.message.reply_text(
-                "Напиши: «показники» — якщо хочеш ввести одометр сам, або «статистичний» — якщо бот має підставити його автоматично."
+                "Напиши «так», якщо мені додати середньостатистичний пробіг, або просто надішли цифри одометра."
             )
             return
 
@@ -714,7 +776,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if missing_fields[0] == "odometer":
                 context.user_data["waiting_odometer_choice"] = True
                 await update.message.reply_text(
-                    "❓ Немає одометра.\nЄ показники одометра чи вивести статистичний пробіг?\nНапиши: «показники» або «статистичний»."
+                    "❓ Немає одометра.\nМені додати середньостатистичний пробіг?\nНапиши «так» або просто надішли цифри одометра."
                 )
                 return
 
@@ -725,7 +787,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = write_to_sheet(parsed)
         context.user_data.pop("pending_data", None)
         context.user_data.pop("waiting_odometer_choice", None)
-        context.user_data.pop("waiting_exact_odometer", None)
         await update.message.reply_text(result)
 
     except json.JSONDecodeError as e:
@@ -747,9 +808,9 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{', '.join(KNOWN_CAR_IDS)}\n\n"
         f"Можеш писати у довільному порядку, наприклад:\n"
         f"• 8730 колодки Бош 370 грн одометр 470420\n"
-        f"• одометр 470420 машина 8730 витрата колодки 370 грн\n"
-        f"• приход 4553 3800\n\n"
-        f"Якщо не вистачить одометра — я перепитаю або підставлю статистичний.",
+        f"• 4553 приход 3800\n"
+        f"• 8730 ТО\n\n"
+        f"Якщо не вистачить одометра — я або перепитаю, або підставлю середньостатистичний.",
         parse_mode="Markdown",
     )
 
@@ -757,7 +818,6 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("pending_data", None)
     context.user_data.pop("waiting_odometer_choice", None)
-    context.user_data.pop("waiting_exact_odometer", None)
     await update.message.reply_text("✅ Поточне введення скасовано.")
 
 

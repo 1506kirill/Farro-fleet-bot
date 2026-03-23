@@ -160,6 +160,18 @@ def build_known_cars_block() -> str:
     return "\n".join(lines)
 
 
+def is_to_phrase(text: str) -> bool:
+    t = str(text or "").lower().strip()
+    return (
+        t == "то"
+        or " то " in f" {t} "
+        or "плановое то" in t
+        or "планове то" in t
+        or t.startswith("то ")
+        or t.endswith(" то")
+    )
+
+
 def build_prompt(message: str, existing_data: dict | None = None) -> str:
     today = datetime.now().strftime("%d.%m.%y")
     existing_block = ""
@@ -195,7 +207,8 @@ def build_prompt(message: str, existing_data: dict | None = None) -> str:
 11. amount всегда в гривне, только число.
 12. odometer только число или null.
 13. Если пользователь пишет "ТО" или "плановое ТО", description верни как "ТО".
-14. Приход может иметь описание, но оно не обязательно.
+14. Если пользователь пишет "ТО" или "плановое ТО", amount может быть null, потому что это пакет фиксированных позиций.
+15. Приход может иметь описание, но оно не обязательно.
 
 Распознавай тип операции по словам:
 - income: приход, доход, пришло, заработок, оплата, выручка
@@ -289,14 +302,32 @@ def ask_ai(message: str, existing_data: dict | None = None) -> dict:
     return {"error": "Не задані CLAUDE_API_KEY і OPENAI_API_KEY"}
 
 
-def compute_missing_fields(data: dict) -> list[str]:
+def apply_to_special_case(data: dict, raw_text: str) -> dict:
+    if is_to_phrase(raw_text):
+        if not data.get("type"):
+            data["type"] = "expense"
+        if not data.get("description"):
+            data["description"] = "ТО"
+        if data.get("amount") in ("", None):
+            data["amount"] = 0
+    return data
+
+
+def compute_missing_fields(data: dict, raw_text: str = "") -> list[str]:
     missing = []
 
     if not data.get("type"):
         missing.append("type")
     if not data.get("car_id"):
         missing.append("car_id")
-    if data.get("amount") in (None, ""):
+
+    to_case = is_to_phrase(raw_text) or str(data.get("description", "")).lower().strip() in [
+        "то",
+        "плановое то",
+        "планове то",
+    ]
+
+    if not to_case and data.get("amount") in (None, ""):
         missing.append("amount")
 
     if data.get("type") == "expense" and not data.get("description"):
@@ -308,7 +339,7 @@ def compute_missing_fields(data: dict) -> list[str]:
     return missing
 
 
-def merge_data(old_data: dict, new_data: dict) -> dict:
+def merge_data(old_data: dict, new_data: dict, raw_text: str = "") -> dict:
     merged = dict(old_data)
 
     for key, value in new_data.items():
@@ -319,7 +350,8 @@ def merge_data(old_data: dict, new_data: dict) -> dict:
 
     merged["car_id"] = resolve_car_id(merged.get("car_id"))
     merged["date"] = normalize_date_short(merged.get("date"))
-    merged["missing_fields"] = compute_missing_fields(merged)
+    merged = apply_to_special_case(merged, raw_text)
+    merged["missing_fields"] = compute_missing_fields(merged, raw_text)
     return merged
 
 
@@ -438,9 +470,7 @@ def estimate_odometer_for_car(car_id: str) -> int | None:
 
 
 def mark_cell_yellow(ws, cell_range: str):
-    fmt = CellFormat(
-        backgroundColor=Color(1, 0.96, 0.75)
-    )
+    fmt = CellFormat(backgroundColor=Color(1, 0.96, 0.75))
     format_cell_range(ws, cell_range, fmt)
 
 
@@ -478,10 +508,10 @@ def get_next_income_row(ws) -> int:
 
 
 def get_previous_income_odometer(ws) -> int | None:
-    k_col_vals = ws.get_all_values()
+    all_vals = ws.get_all_values()
     odometers = []
 
-    for row in k_col_vals[7:]:
+    for row in all_vals[7:]:
         if len(row) > 11:
             value = parse_numeric_text(row[11])
             if value:
@@ -557,9 +587,9 @@ def write_to_sheet(data: dict) -> str:
 
     if data["type"] == "expense":
         desc_lower = str(description).lower().strip()
-        is_to_bundle = desc_lower in ["то", "плановое то", "планове то"] or "плановое то" in desc_lower
+        is_to_bundle_case = desc_lower in ["то", "плановое то", "планове то"] or is_to_phrase(description)
 
-        if is_to_bundle:
+        if is_to_bundle_case:
             start_row, end_row, total_amount = write_expense_rows(
                 ws=ws,
                 date_value=date_value,
@@ -585,12 +615,12 @@ def write_to_sheet(data: dict) -> str:
         ws.update(
             f"E{next_row}:J{next_row}",
             [[
-                date_value,      # E
-                odometer,        # F
-                description,     # G
-                amount,          # H
-                usd_amount,      # I
-                notes or "",     # J
+                date_value,
+                odometer,
+                description,
+                amount,
+                usd_amount,
+                notes or "",
             ]]
         )
 
@@ -625,12 +655,12 @@ def write_to_sheet(data: dict) -> str:
         ws.update(
             f"K{next_row}:P{next_row}",
             [[
-                date_value,      # K
-                odometer,        # L
-                amount,          # M
-                usd_amount,      # N
-                mileage_delta,   # O
-                notes or "",     # P
+                date_value,
+                odometer,
+                amount,
+                usd_amount,
+                mileage_delta,
+                notes or "",
             ]]
         )
 
@@ -679,7 +709,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if numeric_odo:
                 pending_data["odometer"] = numeric_odo
                 pending_data["odometer_estimated"] = False
-                pending_data["missing_fields"] = compute_missing_fields(pending_data)
+                pending_data["missing_fields"] = compute_missing_fields(pending_data, text)
 
                 context.user_data["pending_data"] = pending_data
                 context.user_data.pop("waiting_odometer_choice", None)
@@ -713,7 +743,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pending_data["odometer"] = estimated
                 pending_data["odometer_estimated"] = True
                 pending_data["notes"] = "Пробег проставлен автоматически"
-                pending_data["missing_fields"] = compute_missing_fields(pending_data)
+                pending_data["missing_fields"] = compute_missing_fields(pending_data, text)
 
                 context.user_data["pending_data"] = pending_data
                 context.user_data.pop("waiting_odometer_choice", None)
@@ -746,7 +776,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-            parsed = merge_data(pending_data, parsed)
+            parsed = merge_data(pending_data, parsed, text)
         else:
             parsed = ask_ai(text)
             if "error" in parsed:
@@ -757,7 +787,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             parsed["car_id"] = resolve_car_id(parsed.get("car_id"))
             parsed["date"] = normalize_date_short(parsed.get("date"))
-            parsed["missing_fields"] = compute_missing_fields(parsed)
+            parsed = apply_to_special_case(parsed, text)
+            parsed["missing_fields"] = compute_missing_fields(parsed, text)
 
         logger.info(f"Parsed result: {parsed}")
 
@@ -809,7 +840,8 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Можеш писати у довільному порядку, наприклад:\n"
         f"• 8730 колодки Бош 370 грн одометр 470420\n"
         f"• 4553 приход 3800\n"
-        f"• 8730 ТО\n\n"
+        f"• ТО 4553\n"
+        f"• плановое ТО 8730\n\n"
         f"Якщо не вистачить одометра — я або перепитаю, або підставлю середньостатистичний.",
         parse_mode="Markdown",
     )

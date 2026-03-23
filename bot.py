@@ -3,6 +3,7 @@ import re
 import json
 import logging
 from datetime import datetime
+from statistics import median
 
 import requests
 from bs4 import BeautifulSoup
@@ -18,6 +19,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+from gspread_formatting import format_cell_range, CellFormat, Color
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -32,6 +34,47 @@ ALLOWED_USERS_STR = os.environ.get("ALLOWED_USERS", "")
 ALLOWED_USERS = [int(x.strip()) for x in ALLOWED_USERS_STR.split(",") if x.strip()]
 
 MINFIN_URL = "https://minfin.com.ua/currency/auction/usd/buy/dnepropetrovsk/"
+
+# Полные номера машин
+FULL_PLATES = [
+    "AI1457MM",
+    "АЕ0418ОР",
+    "АЕ2993РI",
+    "AE7935PI",
+    "КА3021ЕО",
+    "КА9489ЕР",
+    "АЕ7121ТА",
+    "АЕ8204ТВ",
+    "AE2548TB",
+    "АЕ9245ТО",
+    "AE0736PK",
+    "AE4715TH",
+    "АЕ6514ТС",
+    "KA4895HE",
+    "KA6843HB",
+    "АЕ5308ТЕ",
+    "BI1875HO",
+    "KA0665IH",
+    "KA0349HO",
+    "BC9854PM",
+    "АЕ8391ТМ",
+    "AE4553XB",
+    "KA8730IX",
+    "AE5725OO",
+    "СА6584КА",
+    "AI3531PH",
+]
+
+def extract_digits(value: str) -> str:
+    return "".join(re.findall(r"\d+", str(value or "")))
+
+VEHICLE_MAP = {}
+for plate in FULL_PLATES:
+    digits = extract_digits(plate)
+    if digits:
+        VEHICLE_MAP[digits] = plate
+
+KNOWN_CAR_IDS = sorted(VEHICLE_MAP.keys())
 
 claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY) if CLAUDE_API_KEY else None
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
@@ -52,7 +95,7 @@ def normalize_date_short(date_str: str | None) -> str:
     if not date_str:
         return datetime.now().strftime("%d.%m.%y")
 
-    date_str = date_str.strip()
+    date_str = str(date_str).strip()
 
     for fmt in ("%d.%m.%Y", "%d.%m.%y", "%d-%m-%Y", "%d-%m-%y"):
         try:
@@ -78,6 +121,37 @@ def clean_json_text(text: str) -> str:
     return text
 
 
+def resolve_car_id(value: str | None) -> str | None:
+    if not value:
+        return None
+
+    raw = str(value).strip().upper()
+    digits = extract_digits(raw)
+
+    if digits in VEHICLE_MAP:
+        return digits
+
+    # Если пользователь вдруг прислал полный номер
+    for short_id, full_plate in VEHICLE_MAP.items():
+        if raw == str(full_plate).upper():
+            return short_id
+
+    return digits if digits in VEHICLE_MAP else None
+
+
+def full_plate_from_short(car_id: str | None) -> str:
+    if not car_id:
+        return "Невідомо"
+    return VEHICLE_MAP.get(str(car_id), str(car_id))
+
+
+def build_known_cars_block() -> str:
+    lines = []
+    for short_id in KNOWN_CAR_IDS:
+        lines.append(f"{short_id} -> {VEHICLE_MAP[short_id]}")
+    return "\n".join(lines)
+
+
 def build_prompt(message: str, existing_data: dict | None = None) -> str:
     today = datetime.now().strftime("%d.%m.%y")
     existing_block = ""
@@ -88,25 +162,31 @@ def build_prompt(message: str, existing_data: dict | None = None) -> str:
 {json.dumps(existing_data, ensure_ascii=False)}
 """
 
+    cars_block = build_known_cars_block()
+
     return f"""Ты помощник для учета автопарка. Сегодня {today}.
 
 Твоя задача: разобрать сообщение пользователя в СТРОГИЙ JSON для записи в Google Sheets.
 
 {existing_block}
 
+Известные машины автопарка:
+{cars_block}
+
 Правила:
 1. Пользователь может писать данные в любом порядке: машина, сумма, одометр, описание, дата, тип операции.
-2. Нужно понимать свободные формулировки.
-3. Если дата не указана — используй сегодняшнюю дату в формате DD.MM.YY.
-4. ДАННЫЕ ДЛЯ ТАБЛИЦЫ ПИШИ НА РУССКОМ ЯЗЫКЕ.
-5. Ответ должен быть ТОЛЬКО JSON, без markdown, без пояснений, без текста до и после JSON.
-6. Если не хватает важных данных — верни missing_fields.
-7. Не выдумывай данные.
-8. Для расхода и прихода description обязательно на русском языке.
-9. category тоже должна быть на русском языке из списка ниже.
-10. amount всегда в гривне, только число.
-11. odometer только число или null.
-12. car_id — номер машины, например 8730.
+2. Пользователь обычно пишет ТОЛЬКО ЦИФРЫ машины, например 4553 или 8730.
+3. car_id в JSON должен быть только из списка известных машин.
+4. Если распознал машину по цифрам, верни car_id только в виде цифр: "4553", "8730" и т.д.
+5. Если дата не указана — используй сегодняшнюю дату в формате DD.MM.YY.
+6. ДАННЫЕ ДЛЯ ТАБЛИЦЫ ПИШИ НА РУССКОМ ЯЗЫКЕ.
+7. Ответ должен быть ТОЛЬКО JSON, без markdown, без пояснений, без текста до и после JSON.
+8. Если не хватает важных данных — верни missing_fields.
+9. Не выдумывай данные.
+10. Для расхода и прихода description обязательно на русском языке.
+11. category тоже должна быть на русском языке из списка ниже.
+12. amount всегда в гривне, только число.
+13. odometer только число или null.
 
 Распознавай тип операции по словам:
 - income: приход, доход, пришло, заработок, оплата, выручка
@@ -205,20 +285,6 @@ def ask_ai(message: str, existing_data: dict | None = None) -> dict:
     return {"error": "Не задані CLAUDE_API_KEY і OPENAI_API_KEY"}
 
 
-def merge_data(old_data: dict, new_data: dict) -> dict:
-    merged = dict(old_data)
-
-    for key, value in new_data.items():
-        if key == "missing_fields":
-            continue
-        if value not in (None, "", []):
-            merged[key] = value
-
-    merged["date"] = normalize_date_short(merged.get("date"))
-    merged["missing_fields"] = compute_missing_fields(merged)
-    return merged
-
-
 def compute_missing_fields(data: dict) -> list[str]:
     missing = []
 
@@ -236,6 +302,21 @@ def compute_missing_fields(data: dict) -> list[str]:
     return missing
 
 
+def merge_data(old_data: dict, new_data: dict) -> dict:
+    merged = dict(old_data)
+
+    for key, value in new_data.items():
+        if key == "missing_fields":
+            continue
+        if value not in (None, "", []):
+            merged[key] = value
+
+    merged["car_id"] = resolve_car_id(merged.get("car_id"))
+    merged["date"] = normalize_date_short(merged.get("date"))
+    merged["missing_fields"] = compute_missing_fields(merged)
+    return merged
+
+
 def ask_for_next_missing_field(missing_fields: list[str]) -> str:
     if not missing_fields:
         return "Уточни, будь ласка, відсутні дані."
@@ -244,25 +325,21 @@ def ask_for_next_missing_field(missing_fields: list[str]) -> str:
 
     mapping = {
         "type": "Вкажи, будь ласка, це прихід чи витрата.",
-        "car_id": "Вкажи номер машини.",
+        "car_id": f"Вкажи номер машини. Доступні: {', '.join(KNOWN_CAR_IDS)}",
         "amount": "Вкажи суму в гривнях.",
         "description": "Вкажи назву приходу або витрати.",
-        "odometer": "Вкажи одометр.",
+        "odometer": "Є показники одометра чи вивести статистичний пробіг? Напиши: «показники» або «статистичний».",
     }
 
     return mapping.get(field, "Уточни, будь ласка, відсутні дані.")
 
 
 def get_usd_black_rate_dnipro() -> float | None:
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
-
+    headers = {"User-Agent": "Mozilla/5.0"}
     resp = requests.get(MINFIN_URL, headers=headers, timeout=15)
     resp.raise_for_status()
 
-    html = resp.text
-    soup = BeautifulSoup(html, "html.parser")
+    soup = BeautifulSoup(resp.text, "html.parser")
     text = soup.get_text(" ", strip=True)
 
     patterns = [
@@ -289,15 +366,89 @@ def get_usd_black_rate_dnipro() -> float | None:
     return None
 
 
+def parse_numeric_text(value) -> int | None:
+    if value is None:
+        return None
+    s = str(value).strip()
+    digits = re.sub(r"[^\d]", "", s)
+    if not digits:
+        return None
+    try:
+        return int(digits)
+    except ValueError:
+        return None
+
+
+def get_last_odometer_stats(ws) -> tuple[int | None, int | None]:
+    all_vals = ws.get_all_values()
+    odometers = []
+
+    for row in all_vals[7:]:
+        expense_odo = parse_numeric_text(row[5]) if len(row) > 5 else None   # F
+        income_odo = parse_numeric_text(row[11]) if len(row) > 11 else None  # L
+
+        if expense_odo:
+            odometers.append(expense_odo)
+        if income_odo:
+            odometers.append(income_odo)
+
+    if not odometers:
+        return None, None
+
+    last_odo = odometers[-1]
+
+    deltas = []
+    for i in range(1, len(odometers)):
+        delta = odometers[i] - odometers[i - 1]
+        if 0 < delta <= 5000:
+            deltas.append(delta)
+
+    if deltas:
+        recent = deltas[-5:]
+        typical_delta = int(round(median(recent)))
+        estimated = last_odo + typical_delta
+        return last_odo, estimated
+
+    return last_odo, last_odo
+
+
+def estimate_odometer_for_car(car_id: str) -> int | None:
+    spreadsheet = get_sheet()
+    full_plate = full_plate_from_short(car_id)
+
+    target_ws = None
+    for ws in spreadsheet.worksheets():
+        title = str(ws.title)
+        if car_id in title or full_plate in title:
+            target_ws = ws
+            break
+
+    if not target_ws:
+        return None
+
+    _, estimated = get_last_odometer_stats(target_ws)
+    return estimated
+
+
+def mark_cell_yellow(ws, cell_range: str):
+    fmt = CellFormat(
+        backgroundColor=Color(1, 0.96, 0.75)  # светло-желтый
+    )
+    format_cell_range(ws, cell_range, fmt)
+
+
 def write_to_sheet(data: dict) -> str:
     spreadsheet = get_sheet()
     car_id = str(data.get("car_id", "")).strip()
+    full_plate = full_plate_from_short(car_id)
+
     date_value = normalize_date_short(data.get("date"))
     amount = float(data.get("amount", 0) or 0)
     odometer = data.get("odometer", "")
     description = data.get("description", "")
     category = data.get("category", "Прочее")
     notes = data.get("notes", None)
+    odometer_estimated = bool(data.get("odometer_estimated", False))
 
     usd_rate = None
     usd_amount = ""
@@ -313,15 +464,18 @@ def write_to_sheet(data: dict) -> str:
         usd_note = "\n⚠️ Курс USD не вдалося отримати"
 
     sheet_name = None
+    target_ws = None
     for ws in spreadsheet.worksheets():
-        if car_id and car_id in ws.title:
-            sheet_name = ws.title
+        title = str(ws.title)
+        if car_id in title or full_plate in title:
+            sheet_name = title
+            target_ws = ws
             break
 
-    if not sheet_name:
-        return f"❌ Машину {car_id} не знайдено в таблиці"
+    if not target_ws:
+        return f"❌ Машину {full_plate} не знайдено в таблиці"
 
-    ws = spreadsheet.worksheet(sheet_name)
+    ws = target_ws
 
     if data["type"] == "expense":
         all_vals = ws.get_all_values()
@@ -359,9 +513,15 @@ def write_to_sheet(data: dict) -> str:
             except Exception:
                 pass
 
+        if odometer_estimated:
+            try:
+                mark_cell_yellow(ws, f"F{next_row}")
+            except Exception as e:
+                logger.error(f"Yellow mark error: {e}")
+
         return (
             f"✅ Витрата внесена!\n"
-            f"🚗 Машина: {car_id}\n"
+            f"🚘 Машина: {full_plate}\n"
             f"📋 {description}\n"
             f"💸 {amount} грн\n"
             f"📅 {date_value}\n"
@@ -397,9 +557,15 @@ def write_to_sheet(data: dict) -> str:
             except Exception:
                 pass
 
+        if odometer_estimated:
+            try:
+                mark_cell_yellow(ws, f"L{next_row}")
+            except Exception as e:
+                logger.error(f"Yellow mark error: {e}")
+
         return (
             f"✅ Дохід внесено!\n"
-            f"🚗 Машина: {car_id}\n"
+            f"🚘 Машина: {full_plate}\n"
             f"📋 {description}\n"
             f"💰 {amount} грн\n"
             f"📅 {date_value}\n"
@@ -409,6 +575,16 @@ def write_to_sheet(data: dict) -> str:
         )
 
     return "❌ Невідомий тип операції"
+
+
+def is_yes_for_exact_odometer(text: str) -> bool:
+    t = text.lower().strip()
+    return t in ["показники", "є показники", "є", "так", "yes"]
+
+
+def is_no_use_statistical(text: str) -> bool:
+    t = text.lower().strip()
+    return t in ["статистичний", "статистика", "ні", "нет", "no"]
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -421,9 +597,83 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
     logger.info(f"Incoming message from {user_id}: {text}")
 
-    await update.message.reply_text("⏳ Обробляю...")
-
     try:
+        if context.user_data.get("waiting_exact_odometer"):
+            odometer_value = parse_numeric_text(text)
+            if not odometer_value:
+                await update.message.reply_text("Вкажи одометр одним числом.")
+                return
+
+            pending_data = context.user_data.get("pending_data", {})
+            pending_data["odometer"] = odometer_value
+            pending_data["odometer_estimated"] = False
+            pending_data["missing_fields"] = compute_missing_fields(pending_data)
+
+            context.user_data["pending_data"] = pending_data
+            context.user_data.pop("waiting_exact_odometer", None)
+
+            if pending_data["missing_fields"]:
+                await update.message.reply_text(
+                    ask_for_next_missing_field(pending_data["missing_fields"])
+                )
+                return
+
+            result = write_to_sheet(pending_data)
+            context.user_data.pop("pending_data", None)
+            await update.message.reply_text(result)
+            return
+
+        if context.user_data.get("waiting_odometer_choice"):
+            pending_data = context.user_data.get("pending_data", {})
+
+            if is_yes_for_exact_odometer(text):
+                context.user_data["waiting_exact_odometer"] = True
+                context.user_data.pop("waiting_odometer_choice", None)
+                await update.message.reply_text("Вкажи одометр одним числом.")
+                return
+
+            if is_no_use_statistical(text):
+                car_id = pending_data.get("car_id")
+                if not car_id:
+                    context.user_data.pop("waiting_odometer_choice", None)
+                    await update.message.reply_text("Спочатку вкажи номер машини.")
+                    return
+
+                estimated = estimate_odometer_for_car(car_id)
+                if not estimated:
+                    context.user_data["waiting_exact_odometer"] = True
+                    context.user_data.pop("waiting_odometer_choice", None)
+                    await update.message.reply_text(
+                        "Не вдалося обчислити статистичний пробіг. Вкажи одометр одним числом."
+                    )
+                    return
+
+                pending_data["odometer"] = estimated
+                pending_data["odometer_estimated"] = True
+                pending_data["notes"] = "Пробег проставлен автоматически"
+                pending_data["missing_fields"] = compute_missing_fields(pending_data)
+
+                context.user_data["pending_data"] = pending_data
+                context.user_data.pop("waiting_odometer_choice", None)
+
+                if pending_data["missing_fields"]:
+                    await update.message.reply_text(
+                        ask_for_next_missing_field(pending_data["missing_fields"])
+                    )
+                    return
+
+                result = write_to_sheet(pending_data)
+                context.user_data.pop("pending_data", None)
+                await update.message.reply_text(result)
+                return
+
+            await update.message.reply_text(
+                "Напиши: «показники» — якщо хочеш ввести одометр сам, або «статистичний» — якщо бот має підставити його автоматично."
+            )
+            return
+
+        await update.message.reply_text("⏳ Обробляю...")
+
         pending_data = context.user_data.get("pending_data")
 
         if pending_data:
@@ -434,33 +684,48 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-            merged = merge_data(pending_data, parsed)
-            parsed = merged
+            parsed = merge_data(pending_data, parsed)
         else:
             parsed = ask_ai(text)
-
             if "error" in parsed:
                 await update.message.reply_text(
                     f"❌ AI тимчасово недоступний.\n\nДеталь: {parsed['error']}"
                 )
                 return
 
+            parsed["car_id"] = resolve_car_id(parsed.get("car_id"))
             parsed["date"] = normalize_date_short(parsed.get("date"))
             parsed["missing_fields"] = compute_missing_fields(parsed)
 
         logger.info(f"Parsed result: {parsed}")
 
         missing_fields = parsed.get("missing_fields", [])
+
+        if "car_id" in missing_fields:
+            context.user_data["pending_data"] = parsed
+            await update.message.reply_text(
+                f"❓ Не вдалося визначити машину.\nВкажи номер машини з цього списку:\n{', '.join(KNOWN_CAR_IDS)}"
+            )
+            return
+
         if missing_fields:
             context.user_data["pending_data"] = parsed
+
+            if missing_fields[0] == "odometer":
+                context.user_data["waiting_odometer_choice"] = True
+                await update.message.reply_text(
+                    "❓ Немає одометра.\nЄ показники одометра чи вивести статистичний пробіг?\nНапиши: «показники» або «статистичний»."
+                )
+                return
+
             question = ask_for_next_missing_field(missing_fields)
-            await update.message.reply_text(
-                f"❓ Не вистачає даних.\n{question}"
-            )
+            await update.message.reply_text(f"❓ Не вистачає даних.\n{question}")
             return
 
         result = write_to_sheet(parsed)
         context.user_data.pop("pending_data", None)
+        context.user_data.pop("waiting_odometer_choice", None)
+        context.user_data.pop("waiting_exact_odometer", None)
         await update.message.reply_text(result)
 
     except json.JSONDecodeError as e:
@@ -478,17 +743,21 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"👋 Привіт! Я бот автопарку.\n\n"
         f"Твій Telegram ID: `{user_id}`\n\n"
-        f"Можеш писати в довільному порядку, наприклад:\n"
+        f"Я знаю такі машини:\n"
+        f"{', '.join(KNOWN_CAR_IDS)}\n\n"
+        f"Можеш писати у довільному порядку, наприклад:\n"
         f"• 8730 колодки Бош 370 грн одометр 470420\n"
         f"• одометр 470420 машина 8730 витрата колодки 370 грн\n"
-        f"• приход по машине 8730 1500 грн одометр 470420\n\n"
-        f"Якщо не вистачить даних — я перепитаю.",
+        f"• приход 4553 3800\n\n"
+        f"Якщо не вистачить одометра — я перепитаю або підставлю статистичний.",
         parse_mode="Markdown",
     )
 
 
 async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("pending_data", None)
+    context.user_data.pop("waiting_odometer_choice", None)
+    context.user_data.pop("waiting_exact_odometer", None)
     await update.message.reply_text("✅ Поточне введення скасовано.")
 
 

@@ -1,13 +1,14 @@
 import os
 import logging
-import anthropic
-import gspread
-from google.oauth2.service_account import Credentials
-from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
 import json
 from datetime import datetime
+
+import anthropic
+import gspread
 from openai import OpenAI
+from google.oauth2.service_account import Credentials
+from telegram import Update
+from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -16,24 +17,27 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")
-GOOGLE_CREDS   = os.environ.get("GOOGLE_CREDS")
+GOOGLE_CREDS = os.environ.get("GOOGLE_CREDS")
 
 ALLOWED_USERS_STR = os.environ.get("ALLOWED_USERS", "")
 ALLOWED_USERS = [int(x.strip()) for x in ALLOWED_USERS_STR.split(",") if x.strip()]
 
-# === AI clients ===
-claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY) if CLAUDE_API_KEY else None
+openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
 
 def get_sheet():
     creds_dict = json.loads(GOOGLE_CREDS)
-    scopes = ["https://spreadsheets.google.com/feeds",
-              "https://www.googleapis.com/auth/drive"]
+    scopes = [
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/drive",
+    ]
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     client = gspread.authorize(creds)
     return client.open_by_key(SPREADSHEET_ID)
 
-def build_prompt(message: str):
+
+def build_prompt(message: str) -> str:
     today = datetime.now().strftime("%d.%m.%Y")
     return f"""Ти помічник для обліку автопарку. Сьогодні {today}.
 
@@ -55,45 +59,86 @@ def build_prompt(message: str):
 
 Якщо не можеш розібрати — поверни {{"error": "опис проблеми"}}"""
 
-# === NEW: AI fallback ===
+
+def clean_json_text(text: str) -> str:
+    if not text:
+        return ""
+    text = text.strip()
+    text = text.replace("```json", "").replace("```", "").strip()
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        text = text[start:end + 1]
+
+    return text
+
+
+def ask_claude(prompt: str) -> dict:
+    if not claude_client:
+        raise Exception("CLAUDE_API_KEY not set")
+
+    response = claude_client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=500,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    text = response.content[0].text.strip()
+    text = clean_json_text(text)
+    return json.loads(text)
+
+
+def ask_openai(prompt: str) -> dict:
+    if not openai_client:
+        raise Exception("OPENAI_API_KEY not set")
+
+    response = openai_client.chat.completions.create(
+        model="gpt-4o-mini",
+        temperature=0,
+        messages=[
+            {
+                "role": "system",
+                "content": "Ты возвращаешь только валидный JSON. Без пояснений, без markdown, без текста до и после JSON.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+    )
+
+    text = response.choices[0].message.content.strip()
+    text = clean_json_text(text)
+    return json.loads(text)
+
+
 def ask_ai(message: str) -> dict:
     prompt = build_prompt(message)
+    logger.info("ask_ai started")
 
-    # --- Claude first ---
-    try:
-        response = claude_client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=500,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        text = response.content[0].text.strip()
-        text = text.replace("```json","").replace("```","").strip()
-        return json.loads(text)
-
-    except Exception as e:
-        logger.error(f"Claude error: {e}")
-
-        # --- fallback to OpenAI ---
+    if claude_client:
         try:
-            response = openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}]
-            )
-            text = response.choices[0].message.content.strip()
-            text = text.replace("```json","").replace("```","").strip()
-            return json.loads(text)
+            logger.info("Trying Claude first")
+            return ask_claude(prompt)
+        except Exception as e:
+            logger.error(f"Claude error: {e}")
 
-        except Exception as e2:
-            logger.error(f"OpenAI error: {e2}")
-            return {"error": "AI недоступний"}
+    if openai_client:
+        try:
+            logger.info("Switching to OpenAI fallback")
+            return ask_openai(prompt)
+        except Exception as e:
+            logger.error(f"OpenAI error: {e}")
+            return {"error": f"AI недоступний: {str(e)}"}
+
+    return {"error": "Не задані CLAUDE_API_KEY і OPENAI_API_KEY"}
+
 
 def write_to_sheet(data: dict) -> str:
     spreadsheet = get_sheet()
-    car_id = data.get("car_id","")
+    car_id = str(data.get("car_id", "")).strip()
 
     sheet_name = None
     for ws in spreadsheet.worksheets():
-        if car_id in ws.title:
+        if car_id and car_id in ws.title:
             sheet_name = ws.title
             break
 
@@ -106,6 +151,7 @@ def write_to_sheet(data: dict) -> str:
         all_vals = ws.get_all_values()
         exp_col = None
         exp_start_row = None
+
         for i, row in enumerate(all_vals):
             for j, cell in enumerate(row):
                 if "Дата" in str(cell) and j == 4:
@@ -120,40 +166,66 @@ def write_to_sheet(data: dict) -> str:
 
         e_col_vals = ws.col_values(5)
         next_row = len(e_col_vals) + 1
+
         for i in range(exp_start_row - 1, len(e_col_vals)):
             if not e_col_vals[i]:
                 next_row = i + 1
                 break
 
-        ws.update(f"E{next_row}:I{next_row}", [[
-            data.get("date",""),
-            data.get("odometer",""),
-            data.get("description",""),
-            data.get("amount",""),
-            round(data.get("amount",0) / 41.75, 2)
-        ]])
+        amount = float(data.get("amount", 0) or 0)
 
-        return f"✅ Витрата внесена!\n🚗 {car_id}\n💸 {data.get('amount')} грн"
+        ws.update(
+            f"E{next_row}:I{next_row}",
+            [[
+                data.get("date", ""),
+                data.get("odometer", ""),
+                data.get("description", ""),
+                amount,
+                round(amount / 41.75, 2),
+            ]],
+        )
+
+        return (
+            f"✅ Витрата внесена!\n"
+            f"🚗 Машина: {car_id}\n"
+            f"📋 {data.get('description', '')}\n"
+            f"💸 {amount} грн\n"
+            f"📅 {data.get('date', '')}\n"
+            f"📊 Категорія: {data.get('category', '')}"
+        )
 
     elif data["type"] == "income":
         k_col_vals = ws.col_values(11)
         next_row = len(k_col_vals) + 1
+
         for i in range(7, len(k_col_vals)):
             if not k_col_vals[i]:
                 next_row = i + 1
                 break
 
-        ws.update(f"K{next_row}:O{next_row}", [[
-            data.get("date",""),
-            data.get("odometer",""),
-            data.get("amount",""),
-            round(data.get("amount",0) / 41.75, 2),
-            ""
-        ]])
+        amount = float(data.get("amount", 0) or 0)
 
-        return f"✅ Дохід внесено!\n🚗 {car_id}\n💰 {data.get('amount')} грн"
+        ws.update(
+            f"K{next_row}:O{next_row}",
+            [[
+                data.get("date", ""),
+                data.get("odometer", ""),
+                amount,
+                round(amount / 41.75, 2),
+                "",
+            ]],
+        )
 
-    return "❌ Невідомий тип"
+        return (
+            f"✅ Дохід внесено!\n"
+            f"🚗 Машина: {car_id}\n"
+            f"💰 {amount} грн\n"
+            f"📅 {data.get('date', '')}\n"
+            f"📍 Одометр: {data.get('odometer', '')}"
+        )
+
+    return "❌ Невідомий тип операції"
+
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -163,33 +235,58 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = update.message.text
+    logger.info(f"Incoming message from {user_id}: {text}")
     await update.message.reply_text("⏳ Обробляю...")
 
     try:
         parsed = ask_ai(text)
+        logger.info(f"Parsed result: {parsed}")
 
         if "error" in parsed:
-            await update.message.reply_text("❌ Не зміг розібрати повідомлення")
+            await update.message.reply_text(
+                f"❌ Не зміг розібрати повідомлення\n\n"
+                f"Деталь: {parsed['error']}\n\n"
+                f"Спробуй так:\n"
+                f"• 8730 колодки Бош 370 грн одометр 470420\n"
+                f"• приход 4553 3800 одометр 269518\n"
+                f"• 5725 масло Mobil 680 грн ТО"
+            )
             return
 
         result = write_to_sheet(parsed)
         await update.message.reply_text(result)
 
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON decode error: {e}")
+        await update.message.reply_text(
+            "❌ Помилка розбору відповіді від AI. Спробуй ще раз іншими словами."
+        )
     except Exception as e:
         logger.error(f"Error: {e}")
         await update.message.reply_text(f"❌ Помилка: {str(e)}")
 
+
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    await update.message.reply_text(f"👋 Твій ID: {user_id}")
+    await update.message.reply_text(
+        f"👋 Привіт! Я бот автопарку.\n\n"
+        f"Твій Telegram ID: `{user_id}`\n\n"
+        f"Пиши мені записи ось так:\n"
+        f"• 8730 колодки Бош 370 грн одометр 470420\n"
+        f"• приход 4553 3800 одометр 269518\n"
+        f"• 5725 масло Mobil 680 грн ТО\n\n"
+        f"Я сам розберу і внесу в таблицю.",
+        parse_mode="Markdown",
+    )
+
 
 def main():
-    from telegram.ext import CommandHandler
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", handle_start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("Bot started!")
     app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()

@@ -4,6 +4,7 @@ import json
 import logging
 from datetime import datetime, date
 from statistics import median
+import time
 
 import requests
 from bs4 import BeautifulSoup
@@ -73,6 +74,9 @@ TO_BUNDLE = [
 ]
 
 SKIP_GRM = {"9245", "5308", "4715", "8204", "0736"}
+
+REPORT_CACHE = {"fleet_snapshot": None, "fleet_snapshot_ts": None, "oil_report": None, "oil_report_ts": None, "grm_report": None, "grm_report_ts": None}
+REPORT_CACHE_TTL_SECONDS = 180
 
 
 def extract_digits(value: str) -> str:
@@ -353,66 +357,88 @@ def find_last_service(ws, service_type: str):
                 return (r[4] if len(r) > 4 else "", odo)
     return None, None
 
-def build_oil_report():
-    s = get_sheet()
+def build_oil_report(force=False):
+    if not force and _cache_fresh(REPORT_CACHE.get("oil_report_ts")) and REPORT_CACHE.get("oil_report") is not None:
+        return REPORT_CACHE["oil_report"]
+
+    snapshot = load_fleet_snapshot(force=force)
     out = []
     for car in KNOWN_CAR_IDS:
-        ws = get_matching_worksheet(s, car)
-        if not ws:
+        item = snapshot.get(car)
+        if not item:
             continue
-        service_date, odo = find_last_service(ws, "oil")
+        rows = item["rows"]
+        service_date, odo = find_last_service_in_rows(rows, "oil")
         if not odo:
             continue
-        cur = get_current_odometer(ws)
+        cur = get_current_odometer_from_rows(rows)
         remaining = 10000 - (cur - odo)
         icon = oil_status_icon(remaining)
         out.append(f"{icon} {car} | {service_date} | {odo} | {format_km_value(remaining)} км")
-    return "\n".join(out) if out else "Немає даних по заміні масла."
+
+    report = "
+".join(out) if out else "Немає даних по заміні масла."
+    REPORT_CACHE["oil_report"] = report
+    REPORT_CACHE["oil_report_ts"] = time.time()
+    return report
 
 
-def build_grm_report():
-    s = get_sheet()
+def build_grm_report(force=False):
+    if not force and _cache_fresh(REPORT_CACHE.get("grm_report_ts")) and REPORT_CACHE.get("grm_report") is not None:
+        return REPORT_CACHE["grm_report"]
+
+    snapshot = load_fleet_snapshot(force=force)
     out = []
     for car in KNOWN_CAR_IDS:
         if car in SKIP_GRM:
             continue
-        ws = get_matching_worksheet(s, car)
-        if not ws:
+        item = snapshot.get(car)
+        if not item:
             continue
-        service_date, odo = find_last_service(ws, "grm")
+        rows = item["rows"]
+        service_date, odo = find_last_service_in_rows(rows, "grm")
         if not odo:
             continue
-        cur = get_current_odometer(ws)
+        cur = get_current_odometer_from_rows(rows)
         remaining = 50000 - (cur - odo)
         icon = grm_status_icon(remaining)
         out.append(f"{icon} {car} | {service_date} | {odo} | {format_km_value(remaining)} км")
-    return "\n".join(out) if out else "Немає даних по заміні ГРМ."
+
+    report = "
+".join(out) if out else "Немає даних по заміні ГРМ."
+    REPORT_CACHE["grm_report"] = report
+    REPORT_CACHE["grm_report_ts"] = time.time()
+    return report
 
 
 async def check_notifications(context: ContextTypes.DEFAULT_TYPE):
-    s = get_sheet()
+    snapshot = load_fleet_snapshot(force=True)
     msgs = []
     for car in KNOWN_CAR_IDS:
-        ws = get_matching_worksheet(s, car)
-        if not ws:
+        item = snapshot.get(car)
+        if not item:
             continue
-        cur = get_current_odometer(ws)
+        rows = item["rows"]
+        cur = get_current_odometer_from_rows(rows)
 
-        _, odo = find_last_service(ws, "oil")
+        _, odo = find_last_service_in_rows(rows, "oil")
         if odo:
             remaining = 10000 - (cur - odo)
             if remaining <= 1000:
                 msgs.append(f"🚗 {car} — масло через {format_km_value(remaining)} км")
 
         if car not in SKIP_GRM:
-            _, odo = find_last_service(ws, "grm")
+            _, odo = find_last_service_in_rows(rows, "grm")
             if odo:
                 remaining = 50000 - (cur - odo)
                 if remaining <= 1000:
                     msgs.append(f"🚗 {car} — ГРМ через {format_km_value(remaining)} км")
 
     if msgs:
-        text = "⚠️ Нагадування:\n\n" + "\n".join(msgs)
+        text = "⚠️ Нагадування:
+
+" + "
+".join(msgs)
         for uid in ALLOWED_USERS:
             await context.bot.send_message(chat_id=uid, text=text)
 

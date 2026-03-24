@@ -183,24 +183,8 @@ def is_to_phrase(text: str) -> bool:
 def detect_liability_type(text: str) -> str | None:
     t = str(text or "").lower().strip()
 
-    plus_markers = [
-        "взял",
-        "принял",
-        "погасил",
-        "погасила",
-        "погасили",
-        "дал ",
-        " дала ",
-        "дали ",
-    ]
-    minus_markers = [
-        "штраф",
-        "долг",
-        "должен",
-        "должна",
-        "должны",
-        "дожен",
-    ]
+    plus_markers = ["взял", "принял", "погасил", "дал "]
+    minus_markers = ["штраф", "долг", "должен", "должна", "дожен"]
 
     if any(marker in t for marker in plus_markers):
         return "liability_plus"
@@ -246,6 +230,10 @@ def parse_numeric_text(value) -> int | None:
         return None
 
 
+def find_all_numbers(text: str) -> list[int]:
+    return [int(x) for x in re.findall(r"\d+", str(text or ""))]
+
+
 def get_matching_worksheet(spreadsheet, car_id: str):
     full_plate = full_plate_from_short(car_id)
     for ws in spreadsheet.worksheets():
@@ -269,12 +257,10 @@ def get_last_used_row_for_block(ws, start_col: int, end_col: int, start_row: int
 
 
 def get_next_expense_row(ws) -> int:
-    # Только ниже последнего расхода
     return get_last_used_row_for_block(ws, 5, 9, 8) + 1
 
 
 def get_next_right_block_row(ws) -> int:
-    # Правая часть таблицы ведется строго вниз по порядку
     last_income_row = get_last_used_row_for_block(ws, 11, 15, 8)
     last_liability_row = get_last_used_row_for_block(ws, 16, 17, 8)
     return max(last_income_row, last_liability_row) + 1
@@ -379,345 +365,27 @@ def estimate_odometer_for_car(car_id: str, target_date_str: str | None = None) -
     return last_odo
 
 
-def build_known_liability_desc(raw_text: str, op_type: str, ai_description: str | None) -> str:
-    t = str(raw_text or "").lower()
-    desc = str(ai_description or "").strip()
+def odometer_is_anomalous(ws, new_odometer: int, operation_date_str: str | None) -> bool:
+    points = get_last_8_weekly_points(ws)
+    if not points:
+        return False
 
-    if "дтп" in t:
-        base = "за ДТП"
-    elif "телевиз" in t:
-        base = "за телевизор"
-    elif "парков" in t:
-        base = "за парковку"
-    elif "превыш" in t:
-        base = "за превышение"
-    elif "штраф" in t and op_type == "liability_plus":
-        base = "за штраф"
-    elif desc:
-        if desc.lower().startswith("за "):
-            base = desc
-        else:
-            base = f"за {desc}"
-    else:
-        base = ""
+    last_date, last_odo = points[-1]
+    target_date = parse_short_date(operation_date_str) or datetime.now().date()
 
-    if op_type == "liability_minus":
-        if "штраф" in t:
-            return f"штраф {base}".strip()
-        return f"долг {base}".strip()
+    if new_odometer <= last_odo:
+        return False
 
-    return f"погашение долга {base}".strip()
+    delta_km = new_odometer - last_odo
+    delta_days = max((target_date - last_date).days, 1)
 
+    # 2500 за неделю = грубая граница аномалии
+    weekly_equivalent = delta_km * 7 / delta_days
 
-def find_all_numbers(text: str) -> list[int]:
-    return [int(x) for x in re.findall(r"\d+", str(text or ""))]
+    if weekly_equivalent > 2500:
+        return True
 
-
-def heuristic_multi_parse(text: str):
-    """
-    Возвращает список действий или None.
-    Используется для типовых фраз с несколькими числами.
-    """
-    t = str(text or "").strip()
-    tl = t.lower()
-
-    car_ids_in_text = []
-    for car_id in KNOWN_CAR_IDS:
-        if re.search(rf"(?<!\d){re.escape(car_id)}(?!\d)", t):
-            car_ids_in_text.append(car_id)
-
-    car_id = car_ids_in_text[0] if car_ids_in_text else None
-    if not car_id:
-        return None
-
-    all_numbers = find_all_numbers(t)
-    amounts = [n for n in all_numbers if str(n) != str(car_id) and str(n) not in KNOWN_CAR_IDS]
-
-    if is_to_phrase(t):
-        return [{
-            "type": "expense",
-            "car_id": car_id,
-            "date": normalize_date_short(None),
-            "amount": 0,
-            "description": "ТО",
-            "odometer": None,
-            "notes": None,
-            "missing_fields": [],
-        }]
-
-    liability_type = detect_liability_type(t)
-
-    # Пример: "Штраф 200 за 8730", "1875 Разбил телевизор долг 1200"
-    if liability_type == "liability_minus" and amounts:
-        amount = amounts[0]
-        return [{
-            "type": "liability_minus",
-            "car_id": car_id,
-            "date": normalize_date_short(None),
-            "amount": amount,
-            "description": build_known_liability_desc(t, "liability_minus", None),
-            "odometer": None,
-            "notes": None,
-            "missing_fields": [],
-        }]
-
-    # Пример: "Взял 3800 за 9245"
-    if liability_type == "liability_plus" and len(amounts) == 1:
-        amount = amounts[0]
-        return [{
-            "type": "income",
-            "car_id": car_id,
-            "date": normalize_date_short(None),
-            "amount": amount,
-            "description": "",
-            "odometer": None,
-            "notes": None,
-            "missing_fields": [],
-        }]
-
-    # Пример: "Взял 3800 за 7121 и взял 200 за дтп"
-    # Большая сумма = приход, меньшая = погашение/долг
-    if liability_type == "liability_plus" and len(amounts) >= 2:
-        sorted_amounts = sorted(amounts, reverse=True)
-        main_amount = sorted_amounts[0]
-        extra_amounts = sorted_amounts[1:]
-
-        actions = [{
-            "type": "income",
-            "car_id": car_id,
-            "date": normalize_date_short(None),
-            "amount": main_amount,
-            "description": "",
-            "odometer": None,
-            "notes": None,
-            "missing_fields": [],
-        }]
-
-        for extra in extra_amounts:
-            actions.append({
-                "type": "liability_plus",
-                "car_id": car_id,
-                "date": normalize_date_short(None),
-                "amount": extra,
-                "description": build_known_liability_desc(t, "liability_plus", None),
-                "odometer": None,
-                "notes": None,
-                "missing_fields": [],
-            })
-
-        return actions
-
-    return None
-
-
-def build_prompt(message: str, existing_data: dict | None = None) -> str:
-    today = datetime.now().strftime("%d.%m.%y")
-    existing_block = ""
-
-    if existing_data:
-        existing_block = f"""
-Уже известные данные из предыдущих сообщений:
-{json.dumps(existing_data, ensure_ascii=False)}
-"""
-
-    cars_block = build_known_cars_block()
-
-    return f"""Ты помощник для учета автопарка. Сегодня {today}.
-
-Твоя задача: разобрать сообщение пользователя в СТРОГИЙ JSON для записи в Google Sheets.
-
-{existing_block}
-
-Известные машины автопарка:
-{cars_block}
-
-Правила:
-1. Пользователь может писать данные в любом порядке: машина, сумма, одометр, описание, дата, тип операции.
-2. Пользователь обычно пишет только цифры машины, например 4553 или 8730.
-3. car_id в JSON должен быть только из списка известных машин.
-4. Если распознал машину по цифрам, верни car_id только в виде цифр.
-5. Если дата не указана — используй сегодняшнюю дату в формате DD.MM.YY.
-6. ДАННЫЕ ДЛЯ ТАБЛИЦЫ ПИШИ НА РУССКОМ ЯЗЫКЕ.
-7. Ответ должен быть ТОЛЬКО JSON, без markdown, без пояснений, без текста до и после JSON.
-8. Если не хватает важных данных — верни missing_fields.
-9. Не выдумывай данные.
-10. Для расхода description обязательно на русском языке.
-11. amount всегда в гривне, только число.
-12. odometer только число или null.
-13. Если пользователь пишет "ТО" или "плановое ТО", description верни как "ТО".
-14. Если пользователь пишет "ТО" или "плановое ТО", amount может быть null, потому что это пакет фиксированных позиций.
-15. Если пользователь пишет про штраф, долг, должен, дожен — type верни как "liability_minus".
-16. Если пользователь пишет "взял", "принял", "погасил", "дал" в контексте долга — type верни как "liability_plus".
-17. Для liability_minus и liability_plus odometer не нужен.
-18. Для liability_minus и liability_plus description должна быть только текстом причины БЕЗ номера машины и БЕЗ суммы.
-19. Если в сообщении есть одна машина и две суммы при словах "взял/принял/погасил/дал", то большая сумма — это income, меньшая — liability_plus.
-20. Для income description может быть пустым.
-
-Распознавай тип операции по словам:
-- income: приход, доход, пришло, заработок, оплата, выручка
-- expense: расход, витрата, купил, ремонт, заправка, масло, колодки, запчасти, страховка, шины, ТО
-- liability_minus: штраф, долг, должен, дожен
-- liability_plus: взял, принял, погасил, дал
-
-Сообщение пользователя:
-"{message}"
-
-Верни JSON строго такого вида:
-{{
-  "type": "expense" или "income" или "liability_minus" или "liability_plus" или null,
-  "car_id": "8730" или null,
-  "date": "DD.MM.YY",
-  "amount": 370,
-  "description": "Колодки Бош",
-  "odometer": 470420,
-  "notes": null,
-  "missing_fields": []
-}}
-
-Если данных не хватает, верни:
-{{
-  "type": "expense" или "income" или "liability_minus" или "liability_plus" или null,
-  "car_id": "8730" или null,
-  "date": "DD.MM.YY",
-  "amount": null,
-  "description": null,
-  "odometer": null,
-  "notes": null,
-  "missing_fields": ["amount", "description"]
-}}
-"""
-
-
-def ask_claude(prompt: str) -> dict:
-    if not claude_client:
-        raise Exception("CLAUDE_API_KEY not set")
-
-    response = claude_client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=700,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    text = response.content[0].text.strip()
-    text = clean_json_text(text)
-    return json.loads(text)
-
-
-def ask_openai(prompt: str) -> dict:
-    if not openai_client:
-        raise Exception("OPENAI_API_KEY not set")
-
-    response = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
-        temperature=0,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Возвращай только валидный JSON. "
-                    "Без пояснений. Без markdown. Без текста до и после JSON."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-    )
-    text = response.choices[0].message.content.strip()
-    text = clean_json_text(text)
-    return json.loads(text)
-
-
-def ask_ai(message: str, existing_data: dict | None = None) -> dict:
-    prompt = build_prompt(message, existing_data=existing_data)
-    logger.info("ask_ai started")
-
-    if claude_client:
-        try:
-            logger.info("Trying Claude first")
-            return ask_claude(prompt)
-        except Exception as e:
-            logger.error(f"Claude error: {e}")
-
-    if openai_client:
-        try:
-            logger.info("Switching to OpenAI fallback")
-            return ask_openai(prompt)
-        except Exception as e:
-            logger.error(f"OpenAI error: {e}")
-            return {"error": f"AI недоступний: {str(e)}"}
-
-    return {"error": "Не задані CLAUDE_API_KEY і OPENAI_API_KEY"}
-
-
-def apply_special_cases(data: dict, raw_text: str) -> dict:
-    liability_type = detect_liability_type(raw_text)
-    if liability_type and not data.get("type"):
-        data["type"] = liability_type
-
-    if is_to_phrase(raw_text):
-        if not data.get("type"):
-            data["type"] = "expense"
-        if not data.get("description"):
-            data["description"] = "ТО"
-        if data.get("amount") in ("", None):
-            data["amount"] = 0
-
-    return data
-
-
-def compute_missing_fields(data: dict, raw_text: str = "") -> list[str]:
-    missing = []
-    op_type = data.get("type")
-    to_case = is_to_phrase(raw_text) or str(data.get("description", "")).lower().strip() in [
-        "то",
-        "плановое то",
-        "планове то",
-    ]
-
-    if not op_type:
-        missing.append("type")
-    if not data.get("car_id"):
-        missing.append("car_id")
-
-    if data.get("amount") in (None, "") and not to_case:
-        missing.append("amount")
-
-    if op_type in ["expense", "liability_minus", "liability_plus"] and not data.get("description"):
-        missing.append("description")
-
-    if op_type in ["expense", "income"] and data.get("odometer") in (None, ""):
-        missing.append("odometer")
-
-    return missing
-
-
-def merge_data(old_data: dict, new_data: dict, raw_text: str = "") -> dict:
-    merged = dict(old_data)
-
-    for key, value in new_data.items():
-        if key == "missing_fields":
-            continue
-        if value not in (None, "", []):
-            merged[key] = value
-
-    merged["car_id"] = resolve_car_id(merged.get("car_id"))
-    merged["date"] = normalize_date_short(merged.get("date"))
-    merged = apply_special_cases(merged, raw_text)
-    merged["missing_fields"] = compute_missing_fields(merged, raw_text)
-    return merged
-
-
-def ask_for_next_missing_field(missing_fields: list[str]) -> str:
-    if not missing_fields:
-        return "Уточни, будь ласка, відсутні дані."
-
-    field = missing_fields[0]
-    mapping = {
-        "type": "Вкажи, будь ласка, це прихід, витрата, штраф чи борг.",
-        "car_id": f"Вкажи номер машини. Доступні: {', '.join(KNOWN_CAR_IDS)}",
-        "amount": "Вкажи суму в гривнях.",
-        "description": "Вкажи опис або причину.",
-        "odometer": "Мені додати середньостатистичний пробіг? Напиши «так» або просто надішли цифри одометра.",
-    }
-    return mapping.get(field, "Уточни, будь ласка, відсутні дані.")
+    return False
 
 
 def build_liability_description(op_type: str, raw_text: str, ai_description: str | None) -> str:
@@ -750,10 +418,120 @@ def build_liability_description(op_type: str, raw_text: str, ai_description: str
     return f"погашение долга {base}".strip()
 
 
+def detect_month_summary_request(text: str) -> str | None:
+    t = str(text or "").lower()
+    if any(x in t for x in ["місяць", "месяц", "поточний місяць", "текущий месяц"]):
+        for car_id in KNOWN_CAR_IDS:
+            if re.search(rf"(?<!\d){re.escape(car_id)}(?!\d)", text):
+                return car_id
+    return None
+
+
+def monthly_summary(car_id: str) -> str:
+    spreadsheet = get_sheet()
+    ws = get_matching_worksheet(spreadsheet, car_id)
+    if not ws:
+        return f"❌ Машину {car_id} не знайдено в таблиці"
+
+    today = datetime.now()
+    month = today.month
+    year = today.year
+
+    all_vals = ws.get_all_values()
+
+    income_sum = 0.0
+    expense_sum = 0.0
+    liability_sum = 0.0
+
+    for row in all_vals[7:]:
+        # Расходы: E дата, H сумма
+        if len(row) > 7:
+            d = parse_short_date(row[4] if len(row) > 4 else None)
+            amt = row[7] if len(row) > 7 else None
+            num = parse_numeric_text(amt)
+            if d and d.month == month and d.year == year and num is not None:
+                expense_sum += num
+
+        # Приходы: K дата, M сумма
+        if len(row) > 12:
+            d = parse_short_date(row[10] if len(row) > 10 else None)
+            amt = row[12] if len(row) > 12 else None
+            num = parse_numeric_text(amt)
+            if d and d.month == month and d.year == year and num is not None:
+                income_sum += num
+
+        # Долги/штрафы/погашения: K дата, P сумма
+        if len(row) > 15:
+            d = parse_short_date(row[10] if len(row) > 10 else None)
+            raw_p = row[15] if len(row) > 15 else None
+            if d and d.month == month and d.year == year and str(raw_p).strip():
+                try:
+                    liability_sum += float(str(raw_p).replace(",", "."))
+                except ValueError:
+                    pass
+
+    return (
+        f"📊 За поточний місяць по {car_id}:\n"
+        f"💰 Дохід: {int(income_sum) if income_sum.is_integer() else round(income_sum, 2)} грн\n"
+        f"💸 Витрати: {int(expense_sum) if expense_sum.is_integer() else round(expense_sum, 2)} грн\n"
+        f"📌 Залишок боргу: {int(liability_sum) if liability_sum.is_integer() else round(liability_sum, 2)} грн"
+    )
+
+
+def detect_duplicate(ws, action: dict, raw_text: str = "") -> bool:
+    op_type = action.get("type")
+    all_vals = ws.get_all_values()
+
+    if op_type == "expense":
+        for row in reversed(all_vals[7:]):
+            if len(row) >= 9 and any(str(x).strip() for x in row[4:9]):
+                last_date = str(row[4]).strip() if len(row) > 4 else ""
+                last_odo = parse_numeric_text(row[5] if len(row) > 5 else None)
+                last_desc = str(row[6]).strip().lower() if len(row) > 6 else ""
+                last_amount = parse_numeric_text(row[7] if len(row) > 7 else None)
+
+                return (
+                    last_date == normalize_date_short(action.get("date"))
+                    and last_odo == parse_numeric_text(action.get("odometer"))
+                    and last_amount == parse_numeric_text(action.get("amount"))
+                    and last_desc == str(action.get("description", "")).strip().lower()
+                )
+        return False
+
+    if op_type == "income":
+        for row in reversed(all_vals[7:]):
+            if len(row) >= 15 and any(str(x).strip() for x in row[10:15]):
+                last_date = str(row[10]).strip()
+                last_odo = parse_numeric_text(row[11] if len(row) > 11 else None)
+                last_amount = parse_numeric_text(row[12] if len(row) > 12 else None)
+                return (
+                    last_date == normalize_date_short(action.get("date"))
+                    and last_odo == parse_numeric_text(action.get("odometer"))
+                    and last_amount == parse_numeric_text(action.get("amount"))
+                )
+        return False
+
+    if op_type in ["liability_minus", "liability_plus"]:
+        for row in reversed(all_vals[7:]):
+            if len(row) >= 17 and any(str(x).strip() for x in row[15:17]):
+                last_date = str(row[10]).strip() if len(row) > 10 else ""
+                last_amount = str(row[15]).strip() if len(row) > 15 else ""
+                last_desc = str(row[16]).strip().lower() if len(row) > 16 else ""
+                current_desc = build_liability_description(op_type, raw_text, action.get("description")).lower()
+                current_amount = -abs(float(action.get("amount", 0))) if op_type == "liability_minus" else abs(float(action.get("amount", 0)))
+                return (
+                    last_date == normalize_date_short(action.get("date"))
+                    and str(last_amount) == str(int(current_amount) if float(current_amount).is_integer() else current_amount)
+                    and last_desc == current_desc
+                )
+        return False
+
+    return False
+
+
 def write_expense_rows(ws, date_value, odometer, items, usd_rate, odometer_estimated):
     start_row = get_next_expense_row(ws)
     rows = []
-    current_row = start_row
 
     for item in items:
         amount = float(item["amount"])
@@ -765,7 +543,6 @@ def write_expense_rows(ws, date_value, odometer, items, usd_rate, odometer_estim
             amount,                   # H
             usd_amount,               # I
         ])
-        current_row += 1
 
     end_row = start_row + len(rows) - 1
     update_range = f"E{start_row}:I{end_row}"
@@ -877,11 +654,11 @@ def write_single_action_to_sheet(data: dict, raw_text: str = "") -> str:
         ws.update(
             update_range,
             [[
-                date_value,      # K
-                odometer,        # L
-                amount,          # M
-                usd_amount,      # N
-                mileage_delta,   # O
+                date_value,
+                odometer,
+                amount,
+                usd_amount,
+                mileage_delta,
             ]]
         )
         apply_blue_text(ws, update_range)
@@ -907,12 +684,17 @@ def write_single_action_to_sheet(data: dict, raw_text: str = "") -> str:
         sign_amount = -abs(amount) if op_type == "liability_minus" else abs(amount)
         liability_desc = build_liability_description(op_type, raw_text, description)
 
-        update_range = f"P{next_row}:Q{next_row}"
+        update_range = f"K{next_row}:Q{next_row}"
         ws.update(
             update_range,
             [[
-                sign_amount,      # P
-                liability_desc,   # Q
+                date_value,      # K
+                "",              # L
+                "",              # M
+                "",              # N
+                "",              # O
+                sign_amount,     # P
+                liability_desc,  # Q
             ]]
         )
         apply_blue_text(ws, update_range)
@@ -941,6 +723,14 @@ def is_yes_statistical(text: str) -> bool:
     return t in ["так", "да", "yes", "ок", "окей", "ага"]
 
 
+def is_yes_confirm(text: str) -> bool:
+    return str(text).lower().strip() in ["так", "да", "yes", "новий", "новая", "новое"]
+
+
+def is_no_confirm(text: str) -> bool:
+    return str(text).lower().strip() in ["ні", "нет", "дубль", "скасувати", "отмена", "cancel"]
+
+
 def actions_need_odometer(actions: list[dict]) -> bool:
     for action in actions:
         if action.get("type") in ["expense", "income"] and action.get("odometer") in (None, ""):
@@ -955,6 +745,145 @@ def fill_odometer_for_actions(actions: list[dict], odometer_value: int, estimate
             action["odometer_estimated"] = estimated
 
 
+def heuristic_multi_parse(text: str):
+    """
+    Локальный разбор частых фраз без ИИ.
+    """
+    t = str(text or "").strip()
+    tl = t.lower()
+
+    car_ids_in_text = []
+    for car_id in KNOWN_CAR_IDS:
+        if re.search(rf"(?<!\d){re.escape(car_id)}(?!\d)", t):
+            car_ids_in_text.append(car_id)
+
+    shared_car_id = car_ids_in_text[0] if car_ids_in_text else None
+    if not shared_car_id:
+        return None
+
+    # Пакетный ввод через запятую
+    if "," in t:
+        parts = [p.strip() for p in t.split(",") if p.strip()]
+        actions = []
+        for part in parts:
+            part_actions = heuristic_multi_parse(part)
+            if part_actions:
+                for a in part_actions:
+                    if not a.get("car_id"):
+                        a["car_id"] = shared_car_id
+                actions.extend(part_actions)
+            else:
+                numbers = find_all_numbers(part)
+                amounts = [n for n in numbers if str(n) != shared_car_id and str(n) not in KNOWN_CAR_IDS]
+                if "приход" in part.lower() and amounts:
+                    actions.append({
+                        "type": "income",
+                        "car_id": shared_car_id,
+                        "date": normalize_date_short(None),
+                        "amount": max(amounts),
+                        "description": "",
+                        "odometer": None,
+                        "notes": None,
+                        "missing_fields": [],
+                    })
+                elif detect_liability_type(part) == "liability_minus" and amounts:
+                    actions.append({
+                        "type": "liability_minus",
+                        "car_id": shared_car_id,
+                        "date": normalize_date_short(None),
+                        "amount": amounts[0],
+                        "description": build_liability_description("liability_minus", part, None),
+                        "odometer": None,
+                        "notes": None,
+                        "missing_fields": [],
+                    })
+                elif detect_liability_type(part) == "liability_plus" and amounts:
+                    actions.append({
+                        "type": "liability_plus",
+                        "car_id": shared_car_id,
+                        "date": normalize_date_short(None),
+                        "amount": amounts[0],
+                        "description": build_liability_description("liability_plus", part, None),
+                        "odometer": None,
+                        "notes": None,
+                        "missing_fields": [],
+                    })
+        return actions if actions else None
+
+    if is_to_phrase(t):
+        return [{
+            "type": "expense",
+            "car_id": shared_car_id,
+            "date": normalize_date_short(None),
+            "amount": 0,
+            "description": "ТО",
+            "odometer": None,
+            "notes": None,
+            "missing_fields": [],
+        }]
+
+    liability_type = detect_liability_type(t)
+    numbers = find_all_numbers(t)
+    amounts = [n for n in numbers if str(n) != shared_car_id and str(n) not in KNOWN_CAR_IDS]
+
+    if liability_type == "liability_minus" and amounts:
+        return [{
+            "type": "liability_minus",
+            "car_id": shared_car_id,
+            "date": normalize_date_short(None),
+            "amount": amounts[0],
+            "description": build_liability_description("liability_minus", t, None),
+            "odometer": None,
+            "notes": None,
+            "missing_fields": [],
+        }]
+
+    if liability_type == "liability_plus" and len(amounts) == 1:
+        amount = amounts[0]
+        return [{
+            "type": "income",
+            "car_id": shared_car_id,
+            "date": normalize_date_short(None),
+            "amount": amount,
+            "description": "",
+            "odometer": None,
+            "notes": None,
+            "missing_fields": [],
+        }]
+
+    if liability_type == "liability_plus" and len(amounts) >= 2:
+        sorted_amounts = sorted(amounts, reverse=True)
+        main_amount = sorted_amounts[0]
+        extra_amounts = sorted_amounts[1:]
+
+        actions = [{
+            "type": "income",
+            "car_id": shared_car_id,
+            "date": normalize_date_short(None),
+            "amount": main_amount,
+            "description": "",
+            "odometer": None,
+            "notes": None,
+            "missing_fields": [],
+        }]
+
+        for extra in extra_amounts:
+            actions.append({
+                "type": "liability_plus",
+                "car_id": shared_car_id,
+                "date": normalize_date_short(None),
+                "amount": extra,
+                "description": build_liability_description("liability_plus", t, None),
+                "odometer": None,
+                "notes": None,
+                "missing_fields": [],
+            })
+
+        return actions
+
+    return None
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
@@ -966,6 +895,49 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Incoming message from {user_id}: {text}")
 
     try:
+        # Подтверждение дубля
+        if context.user_data.get("waiting_duplicate_confirm"):
+            pending_actions = context.user_data.get("pending_actions_after_duplicate", [])
+            if is_yes_confirm(text):
+                context.user_data.pop("waiting_duplicate_confirm", None)
+                context.user_data.pop("pending_actions_after_duplicate", None)
+                result = write_actions_to_sheet(pending_actions, raw_text=text)
+                await update.message.reply_text(result)
+                return
+
+            if is_no_confirm(text):
+                context.user_data.pop("waiting_duplicate_confirm", None)
+                context.user_data.pop("pending_actions_after_duplicate", None)
+                await update.message.reply_text("✅ Запис скасовано як дубль.")
+                return
+
+            await update.message.reply_text("Напиши «новий» або «дубль».")
+            return
+
+        # Подтверждение аномального пробега
+        if context.user_data.get("waiting_odometer_anomaly_confirm"):
+            pending_actions = context.user_data.get("pending_actions_after_anomaly", [])
+            if is_yes_confirm(text):
+                context.user_data.pop("waiting_odometer_anomaly_confirm", None)
+                context.user_data.pop("pending_actions_after_anomaly", None)
+                result = write_actions_to_sheet(pending_actions, raw_text=text)
+                await update.message.reply_text(result)
+                return
+
+            if is_no_confirm(text):
+                context.user_data.pop("waiting_odometer_anomaly_confirm", None)
+                context.user_data["waiting_odometer_choice_actions"] = True
+                context.user_data["pending_actions"] = pending_actions
+                context.user_data.pop("pending_actions_after_anomaly", None)
+                await update.message.reply_text(
+                    "Добре. Надішли правильний одометр або напиши «так», щоб я підставив середньостатистичний."
+                )
+                return
+
+            await update.message.reply_text("Напиши «так» для підтвердження або «ні» для скасування.")
+            return
+
+        # Ожидание одометра для пакета действий
         if context.user_data.get("waiting_odometer_choice_actions"):
             pending_actions = context.user_data.get("pending_actions", [])
             numeric_odo = parse_numeric_text(text)
@@ -974,6 +946,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 fill_odometer_for_actions(pending_actions, numeric_odo, estimated=False)
                 context.user_data.pop("waiting_odometer_choice_actions", None)
                 context.user_data.pop("pending_actions", None)
+
+                # Проверка аномалии
+                first_action = next((a for a in pending_actions if a.get("type") in ["expense", "income"]), None)
+                if first_action:
+                    spreadsheet = get_sheet()
+                    ws = get_matching_worksheet(spreadsheet, first_action["car_id"])
+                    if ws and odometer_is_anomalous(ws, numeric_odo, first_action.get("date")):
+                        context.user_data["waiting_odometer_anomaly_confirm"] = True
+                        context.user_data["pending_actions_after_anomaly"] = pending_actions
+                        await update.message.reply_text("⚠️ Пробіг виглядає нетипово великим. Підтвердити?")
+                        return
+
+                # Проверка дубля
+                spreadsheet = get_sheet()
+                for action in pending_actions:
+                    ws = get_matching_worksheet(spreadsheet, action["car_id"])
+                    if ws and detect_duplicate(ws, action, raw_text=text):
+                        context.user_data["waiting_duplicate_confirm"] = True
+                        context.user_data["pending_actions_after_duplicate"] = pending_actions
+                        await update.message.reply_text("❓ Це новий запис чи дубль попереднього?")
+                        return
+
                 result = write_actions_to_sheet(pending_actions, raw_text=text)
                 await update.message.reply_text(result)
                 return
@@ -983,9 +977,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text("Немає даних для обробки.")
                     return
 
-                first_car = pending_actions[0].get("car_id")
-                first_date = pending_actions[0].get("date")
-                estimated = estimate_odometer_for_car(first_car, first_date)
+                first_action = next((a for a in pending_actions if a.get("type") in ["expense", "income"]), None)
+                if not first_action:
+                    result = write_actions_to_sheet(pending_actions, raw_text=text)
+                    await update.message.reply_text(result)
+                    return
+
+                estimated = estimate_odometer_for_car(first_action["car_id"], first_action.get("date"))
                 if not estimated:
                     context.user_data.pop("waiting_odometer_choice_actions", None)
                     context.user_data.pop("pending_actions", None)
@@ -997,6 +995,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 fill_odometer_for_actions(pending_actions, estimated, estimated=True)
                 context.user_data.pop("waiting_odometer_choice_actions", None)
                 context.user_data.pop("pending_actions", None)
+
+                spreadsheet = get_sheet()
+                for action in pending_actions:
+                    ws = get_matching_worksheet(spreadsheet, action["car_id"])
+                    if ws and detect_duplicate(ws, action, raw_text=text):
+                        context.user_data["waiting_duplicate_confirm"] = True
+                        context.user_data["pending_actions_after_duplicate"] = pending_actions
+                        await update.message.reply_text("❓ Це новий запис чи дубль попереднього?")
+                        return
+
                 result = write_actions_to_sheet(pending_actions, raw_text=text)
                 await update.message.reply_text(result)
                 return
@@ -1006,6 +1014,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        # Ожидание одометра для одной записи
         if context.user_data.get("waiting_odometer_choice"):
             pending_data = context.user_data.get("pending_data", {})
             numeric_odo = parse_numeric_text(text)
@@ -1013,15 +1022,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if numeric_odo:
                 pending_data["odometer"] = numeric_odo
                 pending_data["odometer_estimated"] = False
-                pending_data["missing_fields"] = compute_missing_fields(pending_data, text)
+                pending_data["missing_fields"] = []
 
                 context.user_data["pending_data"] = pending_data
                 context.user_data.pop("waiting_odometer_choice", None)
 
-                if pending_data["missing_fields"]:
-                    await update.message.reply_text(
-                        ask_for_next_missing_field(pending_data["missing_fields"])
-                    )
+                spreadsheet = get_sheet()
+                ws = get_matching_worksheet(spreadsheet, pending_data["car_id"])
+                if ws and odometer_is_anomalous(ws, numeric_odo, pending_data.get("date")):
+                    context.user_data["waiting_odometer_anomaly_confirm"] = True
+                    context.user_data["pending_actions_after_anomaly"] = [pending_data]
+                    context.user_data.pop("pending_data", None)
+                    await update.message.reply_text("⚠️ Пробіг виглядає нетипово великим. Підтвердити?")
+                    return
+
+                if ws and detect_duplicate(ws, pending_data, raw_text=text):
+                    context.user_data["waiting_duplicate_confirm"] = True
+                    context.user_data["pending_actions_after_duplicate"] = [pending_data]
+                    context.user_data.pop("pending_data", None)
+                    await update.message.reply_text("❓ Це новий запис чи дубль попереднього?")
                     return
 
                 result = write_single_action_to_sheet(pending_data, raw_text=text)
@@ -1047,15 +1066,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 pending_data["odometer"] = estimated
                 pending_data["odometer_estimated"] = True
-                pending_data["missing_fields"] = compute_missing_fields(pending_data, text)
+                pending_data["missing_fields"] = []
 
                 context.user_data["pending_data"] = pending_data
                 context.user_data.pop("waiting_odometer_choice", None)
 
-                if pending_data["missing_fields"]:
-                    await update.message.reply_text(
-                        ask_for_next_missing_field(pending_data["missing_fields"])
-                    )
+                spreadsheet = get_sheet()
+                ws = get_matching_worksheet(spreadsheet, pending_data["car_id"])
+
+                if ws and detect_duplicate(ws, pending_data, raw_text=text):
+                    context.user_data["waiting_duplicate_confirm"] = True
+                    context.user_data["pending_actions_after_duplicate"] = [pending_data]
+                    context.user_data.pop("pending_data", None)
+                    await update.message.reply_text("❓ Це новий запис чи дубль попереднього?")
                     return
 
                 result = write_single_action_to_sheet(pending_data, raw_text=text)
@@ -1068,16 +1091,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        # Сводка за месяц
+        car_id_for_summary = detect_month_summary_request(text)
+        if car_id_for_summary:
+            await update.message.reply_text(monthly_summary(car_id_for_summary))
+            return
+
         await update.message.reply_text("⏳ Обробляю...")
 
+        # Сначала локальный пакетный разбор
         heuristic_actions = heuristic_multi_parse(text)
         if heuristic_actions:
-            for action in heuristic_actions:
-                action["car_id"] = resolve_car_id(action.get("car_id"))
-                action["date"] = normalize_date_short(action.get("date"))
-                action = apply_special_cases(action, text)
-                action["missing_fields"] = compute_missing_fields(action, text)
-
             if actions_need_odometer(heuristic_actions):
                 context.user_data["pending_actions"] = heuristic_actions
                 context.user_data["waiting_odometer_choice_actions"] = True
@@ -1085,6 +1109,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "❓ Немає одометра.\nМені додати середньостатистичний пробіг?\nНапиши «так» або просто надішли цифри одометра."
                 )
                 return
+
+            spreadsheet = get_sheet()
+            for action in heuristic_actions:
+                ws = get_matching_worksheet(spreadsheet, action["car_id"])
+                if ws and detect_duplicate(ws, action, raw_text=text):
+                    context.user_data["waiting_duplicate_confirm"] = True
+                    context.user_data["pending_actions_after_duplicate"] = heuristic_actions
+                    await update.message.reply_text("❓ Це новий запис чи дубль попереднього?")
+                    return
 
             result = write_actions_to_sheet(heuristic_actions, raw_text=text)
             await update.message.reply_text(result)
@@ -1100,7 +1133,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-            parsed = merge_data(pending_data, parsed, text)
+            parsed["car_id"] = resolve_car_id(parsed.get("car_id"))
+            parsed["date"] = normalize_date_short(parsed.get("date"))
+            parsed = apply_special_cases(parsed, text)
+            parsed["missing_fields"] = compute_missing_fields(parsed, text)
         else:
             parsed = ask_ai(text)
             if "error" in parsed:
@@ -1128,7 +1164,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if missing_fields:
             context.user_data["pending_data"] = parsed
 
-            if missing_fields[0] == "odometer":
+            if "odometer" in missing_fields:
                 context.user_data["waiting_odometer_choice"] = True
                 await update.message.reply_text(
                     "❓ Немає одометра.\nМені додати середньостатистичний пробіг?\nНапиши «так» або просто надішли цифри одометра."
@@ -1139,9 +1175,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❓ Не вистачає даних.\n{question}")
             return
 
+        spreadsheet = get_sheet()
+        ws = get_matching_worksheet(spreadsheet, parsed["car_id"])
+
+        if ws and parsed.get("type") in ["expense", "income"] and parsed.get("odometer") not in (None, ""):
+            if odometer_is_anomalous(ws, int(parsed["odometer"]), parsed.get("date")):
+                context.user_data["waiting_odometer_anomaly_confirm"] = True
+                context.user_data["pending_actions_after_anomaly"] = [parsed]
+                await update.message.reply_text("⚠️ Пробіг виглядає нетипово великим. Підтвердити?")
+                return
+
+        if ws and detect_duplicate(ws, parsed, raw_text=text):
+            context.user_data["waiting_duplicate_confirm"] = True
+            context.user_data["pending_actions_after_duplicate"] = [parsed]
+            await update.message.reply_text("❓ Це новий запис чи дубль попереднього?")
+            return
+
         result = write_single_action_to_sheet(parsed, raw_text=text)
         context.user_data.pop("pending_data", None)
-        context.user_data.pop("waiting_odometer_choice", None)
         await update.message.reply_text(result)
 
     except json.JSONDecodeError as e:
@@ -1162,14 +1213,10 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Я знаю такі машини:\n"
         f"{', '.join(KNOWN_CAR_IDS)}\n\n"
         f"Приклади:\n"
-        f"• 8730 колодки Бош 370 грн одометр 470420\n"
-        f"• 4553 приход 3800\n"
-        f"• ТО 4553\n"
+        f"• 8730 місяць\n"
+        f"• 8730 приход 3800, долг 200 за дтп, штраф 300 за парковку\n"
         f"• Штраф 200 за 8730\n"
-        f"• 1875 Разбил телевизор долг 1200\n"
-        f"• Взял 3800 за 9245\n"
-        f"• Взял 3800 за 7121 и взял 200 за дтп\n"
-        f"• Взял 3800 за 5725 и сверху взял 300 за штраф\n\n"
+        f"• ТО 4553\n\n"
         f"Якщо не вистачить одометра — я або перепитаю, або підставлю середньостатистичний.",
         parse_mode="Markdown",
     )
@@ -1180,6 +1227,10 @@ async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("pending_actions", None)
     context.user_data.pop("waiting_odometer_choice", None)
     context.user_data.pop("waiting_odometer_choice_actions", None)
+    context.user_data.pop("waiting_duplicate_confirm", None)
+    context.user_data.pop("pending_actions_after_duplicate", None)
+    context.user_data.pop("waiting_odometer_anomaly_confirm", None)
+    context.user_data.pop("pending_actions_after_anomaly", None)
     await update.message.reply_text("✅ Поточне введення скасовано.")
 
 

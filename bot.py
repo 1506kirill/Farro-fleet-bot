@@ -317,23 +317,21 @@ def oil_status_icon(remaining: int | float) -> str:
     r = float(remaining)
     if r <= 1000:
         return "🔴"
-    if r <= 3000:
+    if r <= 4000:
         return "🟠"
-    if r <= 6000:
+    if r <= 7000:
         return "🟡"
     return "🟢"
-
 
 def grm_status_icon(remaining: int | float) -> str:
     r = float(remaining)
     if r <= 1000:
         return "🔴"
-    if r <= 10000:
+    if r <= 17000:
         return "🟠"
-    if r <= 25000:
+    if r <= 34000:
         return "🟡"
     return "🟢"
-
 
 def is_oil_report_request(text: str) -> bool:
     t = re.sub(r"\s+", " ", str(text or "").strip().lower())
@@ -346,39 +344,79 @@ def is_grm_report_request(text: str) -> bool:
 
 
 def find_last_service_in_rows(rows, service_type: str):
+    def row_date_odo(idx):
+        r = rows[idx]
+        row_date = r[4] if len(r) > 4 else ""
+        row_odo = parse_num(r[5] if len(r) > 5 else None)
+        return row_date, row_odo
+
     if service_type == "oil":
-        keywords = [
+        strict_keywords = [
             "масло в двигатель",
-            "масляный фильтр",
             "замена масла",
             "моторное масло",
         ]
-    else:
-        keywords = ["грм", "комплект грм", "замена грм", "замана грм"]
+        filter_keyword = "масляный фильтр"
 
-    for r in reversed(rows[7:]):
-        if len(r) > 6:
+        for idx in range(len(rows) - 1, 7, -1):
+            r = rows[idx]
+            if len(r) <= 6:
+                continue
             desc = str(r[6]).lower().strip()
-            odo = parse_num(r[5] if len(r) > 5 else None)
-            if odo and any(k in desc for k in keywords):
-                return (r[4] if len(r) > 4 else "", odo)
+            row_date, row_odo = row_date_odo(idx)
+            if not row_odo:
+                continue
+
+            if any(k in desc for k in strict_keywords):
+                return row_date, row_odo
+
+            if filter_keyword in desc:
+                # засчитываем масляный фильтр как точку замены масла только если
+                # рядом в том же пакете есть строка "масло в двигатель" с теми же датой и одометром
+                for j in range(max(7, idx - 8), min(len(rows), idx + 9)):
+                    if j == idx:
+                        continue
+                    rr = rows[j]
+                    if len(rr) <= 6:
+                        continue
+                    d2 = rr[4] if len(rr) > 4 else ""
+                    o2 = parse_num(rr[5] if len(rr) > 5 else None)
+                    desc2 = str(rr[6]).lower().strip()
+                    if d2 == row_date and o2 == row_odo and "масло в двигатель" in desc2:
+                        return row_date, row_odo
+        return None, None
+
+    keywords = ["комплект грм", "замена грм", "замана грм", "грм"]
+    for idx in range(len(rows) - 1, 7, -1):
+        r = rows[idx]
+        if len(r) <= 6:
+            continue
+        desc = str(r[6]).lower().strip()
+        row_date, row_odo = row_date_odo(idx)
+        if row_odo and any(k in desc for k in keywords):
+            return row_date, row_odo
     return None, None
 
-
 def get_current_odometer_from_rows(rows):
+    # Берем последнее заполненное значение одометра в расходах (F)
+    # и последнее заполненное значение одометра в приходах (L),
+    # затем выбираем большее из этих двух, как и обсуждали.
     last_f = 0
     last_l = 0
-    for r in rows[7:]:
-        if len(r) > 5:
-            v = parse_num(r[5])
-            if v:
-                last_f = v
-        if len(r) > 11:
-            v = parse_num(r[11])
-            if v:
-                last_l = v
-    return max(last_f, last_l)
 
+    for r in reversed(rows[7:]):
+        if not last_f and len(r) > 5:
+            v = parse_num(r[5])
+            if v is not None:
+                last_f = v
+        if not last_l and len(r) > 11:
+            v = parse_num(r[11])
+            if v is not None:
+                last_l = v
+        if last_f and last_l:
+            break
+
+    return max(last_f, last_l)
 
 def get_service_snapshot(force: bool = False):
     now = time.time()

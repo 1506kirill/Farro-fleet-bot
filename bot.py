@@ -353,35 +353,44 @@ def normalize_service_text(s: str) -> str:
 
 def build_expense_blocks(rows):
     """
-    Собираем блоки расходов по одинаковым дате (E) и одометру (F).
-    Это покрывает пакетные записи ТО/ГРМ на несколько строк подряд.
+    Собираем блоки расходов по строкам E/F/G.
+    Поддерживает два варианта записи:
+    1) во всех строках блока повторяются дата и одометр;
+    2) дата и одометр указаны только в первой строке блока,
+       а ниже идут продолжения с пустыми E/F, но заполненным G.
     """
     blocks = []
     current = None
 
     for row in rows[7:]:
-        if len(row) <= 6:
-            continue
-
         row_date = str(row[4]).strip() if len(row) > 4 else ""
         row_odo = parse_num(row[5] if len(row) > 5 else None)
         desc = normalize_service_text(row[6] if len(row) > 6 else "")
 
-        if not row_date or row_odo is None or not desc:
+        # Полностью пустая строка внутри блока не рвет блок, просто пропускаем
+        if not row_date and row_odo is None and not desc:
             continue
 
-        key = (row_date, row_odo)
-        if current and current["key"] == key:
+        # Новая опорная строка блока
+        if row_date and row_odo is not None:
+            key = (row_date, row_odo)
+            if current and current["key"] == key:
+                if desc:
+                    current["descs"].append(desc)
+            else:
+                if current:
+                    blocks.append(current)
+                current = {
+                    "key": key,
+                    "date": row_date,
+                    "odo": row_odo,
+                    "descs": [desc] if desc else [],
+                }
+            continue
+
+        # Продолжение предыдущего блока: есть описание, но нет новой даты/одометра
+        if current and desc:
             current["descs"].append(desc)
-        else:
-            if current:
-                blocks.append(current)
-            current = {
-                "key": key,
-                "date": row_date,
-                "odo": row_odo,
-                "descs": [desc],
-            }
 
     if current:
         blocks.append(current)
@@ -394,35 +403,39 @@ def service_block_score(descs, service_type: str) -> int:
     score = 0
 
     if service_type == "oil":
-        # Сильные признаки замены масла
+        # Сильные признаки именно замены масла двигателя
         if "масло в двигатель" in text:
-            score += 10
+            score += 14
         if "моторное масло" in text:
-            score += 9
+            score += 12
         if "замена масла" in text:
-            score += 8
+            score += 10
         if "масляный фильтр" in text:
-            score += 6
-
-        # Усиливаем типичный пакет ТО, но не используем само "ТО" как единственный ориентир
-        if "масло в двигатель" in text and "масляный фильтр" in text:
             score += 5
-        if "масло в двигатель" in text and ("работы за то" in text or "газовые фильтра" in text or "воздушный фильтр" in text):
-            score += 2
 
-        # Ложные срабатывания ослабляем
-        if "масло кпп" in text or "масло в коробку" in text or "масло гур" in text or "масло редуктора" in text:
-            score -= 6
+        # Типичный пакет ТО по двигателю
+        if "масло в двигатель" in text and "масляный фильтр" in text:
+            score += 8
+        if "масло в двигатель" in text and ("воздушный фильтр" in text or "газовые фильтра" in text or "работы за то" in text):
+            score += 3
+
+        # Ложные срабатывания
+        if any(x in text for x in ["масло кпп", "масло в коробку", "масло гур", "масло редуктора", "гидравлическое масло"]):
+            score -= 10
 
     elif service_type == "grm":
         if "комплект грм" in text:
-            score += 12
+            score += 15
         if "замена грм" in text or "замана грм" in text:
-            score += 10
-        # Просто "грм" — более слабый сигнал
-        if re.search(r"(^|[^а-я])грм([^а-я]|$)", text):
+            score += 12
+        if "ремень грм" in text:
+            score += 8
+        if "ролик грм" in text:
             score += 6
-        if "ролик грм" in text or "ремень грм" in text or "помпа" in text:
+        if re.search(r"(^|[^а-я])грм([^а-я]|$)", text):
+            score += 5
+        # Помпа часто меняется вместе с ГРМ, но сама по себе не равна ГРМ
+        if "помпа" in text and ("грм" in text or "ремень" in text):
             score += 3
 
     return score
@@ -436,7 +449,7 @@ def find_last_service_in_rows(rows, service_type: str):
     """
     blocks = build_expense_blocks(rows)
 
-    min_score = 8 if service_type == "oil" else 9
+    min_score = 10 if service_type == "oil" else 10
 
     for block in reversed(blocks):
         score = service_block_score(block["descs"], service_type)
@@ -444,7 +457,7 @@ def find_last_service_in_rows(rows, service_type: str):
             return block["date"], block["odo"]
 
     # Фолбэк: если строгих блоков не нашли, берем последний блок со слабым, но явным сигналом
-    fallback_min = 5 if service_type == "oil" else 6
+    fallback_min = 7 if service_type == "oil" else 7
     for block in reversed(blocks):
         score = service_block_score(block["descs"], service_type)
         if score >= fallback_min:
@@ -454,25 +467,41 @@ def find_last_service_in_rows(rows, service_type: str):
 
 
 def get_current_odometer_from_rows(rows):
-    # Берем последнее заполненное значение одометра в расходах (F)
-    # и последнее заполненное значение одометра в приходах (L),
-    # затем выбираем большее из этих двух, как и обсуждали.
-    last_f = 0
-    last_l = 0
+    """
+    Берем последнюю точку пробега по дате, а не просто нижнюю строку листа.
+    Это важно, потому что в расходах могут быть позже дописаны старые ремонты,
+    а в приходах стоять более свежий реальный текущий пробег.
 
-    for r in reversed(rows[7:]):
-        if not last_f and len(r) > 5:
-            v = parse_num(r[5])
-            if v is not None:
-                last_f = v
-        if not last_l and len(r) > 11:
-            v = parse_num(r[11])
-            if v is not None:
-                last_l = v
-        if last_f and last_l:
-            break
+    Источники:
+    - расходы: E (дата), F (одометр)
+    - приходы: K (дата), L (одометр)
+    """
+    points = []
 
-    return max(last_f, last_l)
+    for r in rows[7:]:
+        # Расходы E/F
+        if len(r) > 5:
+            d = parse_short_date(r[4] if len(r) > 4 else None)
+            odo = parse_num(r[5])
+            if d and odo is not None:
+                points.append((d, odo, "expense"))
+
+        # Приходы K/L
+        if len(r) > 11:
+            d = parse_short_date(r[10] if len(r) > 10 else None)
+            odo = parse_num(r[11])
+            if d and odo is not None:
+                points.append((d, odo, "income"))
+
+    if not points:
+        return 0
+
+    # Сначала ищем самые свежие по дате точки
+    latest_date = max(p[0] for p in points)
+    latest_points = [p for p in points if p[0] == latest_date]
+
+    # Если на одну дату несколько точек, берем максимальный одометр
+    return max(p[1] for p in latest_points)
 
 def get_service_snapshot(force: bool = False):
     now = time.time()

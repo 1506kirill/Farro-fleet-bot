@@ -302,15 +302,13 @@ def build_oil_report():
         ws = get_matching_worksheet(s, car)
         if not ws:
             continue
-        service_date, odo = find_last(ws, ["масло", "то"])
+        service_date, odo = find_last_service(ws, "oil")
         if not odo:
             continue
         cur = get_current_odometer(ws)
-        left = 10000 - (cur - odo)
-        if left < 0:
-            left = 0
-        icon = "🟢" if left <= 2000 else "🟡" if left <= 5000 else "🔴"
-        out.append(f"{icon} {car} | {service_date} | {odo} | {left} км")
+        remaining = 10000 - (cur - odo)
+        icon = oil_status_icon(remaining)
+        out.append(f"{icon} {car} | {service_date} | {odo} | {format_km_value(remaining)} км")
     return "\n".join(out) if out else "Немає даних по заміні масла."
 
 
@@ -323,15 +321,13 @@ def build_grm_report():
         ws = get_matching_worksheet(s, car)
         if not ws:
             continue
-        service_date, odo = find_last(ws, ["грм"])
+        service_date, odo = find_last_service(ws, "grm")
         if not odo:
             continue
         cur = get_current_odometer(ws)
-        left = 50000 - (cur - odo)
-        if left < 0:
-            left = 0
-        icon = "🟢" if left <= 5000 else "🟡" if left <= 15000 else "🔴"
-        out.append(f"{icon} {car} | {service_date} | {odo} | {left} км")
+        remaining = 50000 - (cur - odo)
+        icon = grm_status_icon(remaining)
+        out.append(f"{icon} {car} | {service_date} | {odo} | {format_km_value(remaining)} км")
     return "\n".join(out) if out else "Немає даних по заміні ГРМ."
 
 
@@ -343,24 +339,25 @@ async def check_notifications(context: ContextTypes.DEFAULT_TYPE):
         if not ws:
             continue
         cur = get_current_odometer(ws)
-        _, odo = find_last(ws, ["масло", "то"])
+
+        _, odo = find_last_service(ws, "oil")
         if odo:
-            left = 10000 - (cur - odo)
-            if 0 < left <= 1000:
-                msgs.append(f"🚗 {car} — масло через {left} км")
+            remaining = 10000 - (cur - odo)
+            if remaining <= 1000:
+                msgs.append(f"🚗 {car} — масло через {format_km_value(remaining)} км")
+
         if car not in SKIP_GRM:
-            _, odo = find_last(ws, ["грм"])
+            _, odo = find_last_service(ws, "grm")
             if odo:
-                left = 50000 - (cur - odo)
-                if 0 < left <= 1000:
-                    msgs.append(f"🚗 {car} — ГРМ через {left} км")
+                remaining = 50000 - (cur - odo)
+                if remaining <= 1000:
+                    msgs.append(f"🚗 {car} — ГРМ через {format_km_value(remaining)} км")
+
     if msgs:
         text = "⚠️ Нагадування:\n\n" + "\n".join(msgs)
         for uid in ALLOWED_USERS:
             await context.bot.send_message(chat_id=uid, text=text)
 
-
-# ================= ODOMETER ANALYTICS =================
 
 def get_last_8_weekly_points(ws):
     all_vals = ws.get_all_values()
@@ -984,11 +981,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         # ТО / ГРМ reports without car
-        if text_lower in ["масло", "замена масла", "заміна масла", "то"]:
+        if is_oil_report_request(text):
             await update.message.reply_text("🛢 Стан масла:\n\n" + build_oil_report())
             return
 
-        if text_lower in ["грм", "замена грм", "комплект грм", "заміна грм"]:
+        if is_grm_report_request(text):
             await update.message.reply_text("⚙️ Стан ГРМ:\n\n" + build_grm_report())
             return
 

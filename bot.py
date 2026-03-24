@@ -39,39 +39,39 @@ MINFIN_URL = "https://minfin.com.ua/currency/auction/usd/buy/dnepropetrovsk/"
 
 FULL_PLATES = [
     "AI1457MM",
-    "ÐÐ0418ÐÐ ",
-    "ÐÐ2993Ð I",
+    "АЕ0418ОР",
+    "АЕ2993РI",
     "AE7935PI",
-    "ÐÐ3021ÐÐ",
-    "ÐÐ9489ÐÐ ",
-    "ÐÐ7121Ð¢Ð",
-    "ÐÐ8204Ð¢Ð",
+    "КА3021ЕО",
+    "КА9489ЕР",
+    "АЕ7121ТА",
+    "АЕ8204ТВ",
     "AE2548TB",
-    "ÐÐ9245Ð¢Ð",
+    "АЕ9245ТО",
     "AE0736PK",
     "AE4715TH",
-    "ÐÐ6514Ð¢Ð¡",
+    "АЕ6514ТС",
     "KA4895HE",
     "KA6843HB",
-    "ÐÐ5308Ð¢Ð",
+    "АЕ5308ТЕ",
     "BI1875HO",
     "KA0665IH",
     "KA0349HO",
     "BC9854PM",
-    "ÐÐ8391Ð¢Ð",
+    "АЕ8391ТМ",
     "AE4553XB",
     "KA8730IX",
     "AE5725OO",
-    "Ð¡Ð6584ÐÐ",
+    "СА6584КА",
     "AI3531PH",
 ]
 
 TO_BUNDLE = [
-    {"description": "ÐÐ°ÑÐ»Ð¾ Ð² Ð´Ð²Ð¸Ð³Ð°ÑÐµÐ»Ñ", "amount": 780},
-    {"description": "ÐÐ¾Ð·Ð´ÑÑÐ½ÑÐ¹ ÑÐ¸Ð»ÑÑÑ WX WA9545", "amount": 270},
-    {"description": "ÐÐ°Ð·Ð¾Ð²ÑÐµ ÑÐ¸Ð»ÑÑÑÐ°", "amount": 100},
-    {"description": "ÐÐ°ÑÐ»ÑÐ½ÑÐ¹ ÑÐ¸Ð»ÑÑÑ BO 0451103318", "amount": 160},
-    {"description": "Ð Ð°Ð±Ð¾ÑÑ Ð·Ð° Ð¢Ð", "amount": 300},
+    {"description": "Масло в двигатель", "amount": 780},
+    {"description": "Воздушный фильтр WX WA9545", "amount": 270},
+    {"description": "Газовые фильтра", "amount": 100},
+    {"description": "Масляный фильтр BO 0451103318", "amount": 160},
+    {"description": "Работы за ТО", "amount": 300},
 ]
 
 SKIP_GRM = {"9245", "5308", "4715", "8204", "0736"}
@@ -168,26 +168,26 @@ def resolve_car_id(value: str | None) -> str | None:
 
 def full_plate_from_short(car_id: str | None) -> str:
     if not car_id:
-        return "ÐÐµÐ²ÑÐ´Ð¾Ð¼Ð¾"
+        return "Невідомо"
     return VEHICLE_MAP.get(str(car_id), str(car_id))
 
 
 def is_to_phrase(text: str) -> bool:
     t = str(text or "").lower().strip()
     return (
-        t == "ÑÐ¾"
-        or " ÑÐ¾ " in f" {t} "
-        or "Ð¿Ð»Ð°Ð½Ð¾Ð²Ð¾Ðµ ÑÐ¾" in t
-        or "Ð¿Ð»Ð°Ð½Ð¾Ð²Ðµ ÑÐ¾" in t
-        or t.startswith("ÑÐ¾ ")
-        or t.endswith(" ÑÐ¾")
+        t == "то"
+        or " то " in f" {t} "
+        or "плановое то" in t
+        or "планове то" in t
+        or t.startswith("то ")
+        or t.endswith(" то")
     )
 
 
 def detect_liability_type(text: str) -> str | None:
     t = str(text or "").lower().strip()
-    plus_markers = ["Ð²Ð·ÑÐ»", "Ð¿ÑÐ¸Ð½ÑÐ»", "Ð¿Ð¾Ð³Ð°ÑÐ¸Ð»", "Ð´Ð°Ð» "]
-    minus_markers = ["ÑÑÑÐ°Ñ", "Ð´Ð¾Ð»Ð³", "Ð´Ð¾Ð»Ð¶ÐµÐ½", "Ð´Ð¾Ð»Ð¶Ð½Ð°", "Ð´Ð¾Ð¶ÐµÐ½"]
+    plus_markers = ["взял", "принял", "погасил", "дал "]
+    minus_markers = ["штраф", "долг", "должен", "должна", "дожен"]
     if any(marker in t for marker in plus_markers):
         return "liability_plus"
     if any(marker in t for marker in minus_markers):
@@ -316,45 +316,45 @@ def format_km_value(value: int | float) -> str:
 def oil_status_icon(remaining: int | float) -> str:
     r = float(remaining)
     if r <= 1000:
-        return "ð´"
+        return "🔴"
     if r <= 3000:
-        return "ð "
+        return "🟠"
     if r <= 6000:
-        return "ð¡"
-    return "ð¢"
+        return "🟡"
+    return "🟢"
 
 
 def grm_status_icon(remaining: int | float) -> str:
     r = float(remaining)
     if r <= 1000:
-        return "ð´"
+        return "🔴"
     if r <= 10000:
-        return "ð "
+        return "🟠"
     if r <= 25000:
-        return "ð¡"
-    return "ð¢"
+        return "🟡"
+    return "🟢"
 
 
 def is_oil_report_request(text: str) -> bool:
     t = re.sub(r"\s+", " ", str(text or "").strip().lower())
-    return t in {"Ð¼Ð°ÑÐ»Ð¾", "Ð·Ð°Ð¼ÐµÐ½Ð° Ð¼Ð°ÑÐ»Ð°", "Ð·Ð°Ð¼ÑÐ½Ð° Ð¼Ð°ÑÐ»Ð°", "ÑÐ¾", "Ð¿Ð»Ð°Ð½Ð¾Ð²Ð¾Ðµ ÑÐ¾", "Ð¿Ð»Ð°Ð½Ð¾Ð²Ðµ ÑÐ¾"}
+    return t in {"масло", "замена масла", "заміна масла", "то", "плановое то", "планове то"}
 
 
 def is_grm_report_request(text: str) -> bool:
     t = re.sub(r"\s+", " ", str(text or "").strip().lower())
-    return t in {"Ð³ÑÐ¼", "Ð·Ð°Ð¼ÐµÐ½Ð° Ð³ÑÐ¼", "Ð·Ð°Ð¼ÑÐ½Ð° Ð³ÑÐ¼", "ÐºÐ¾Ð¼Ð¿Ð»ÐµÐºÑ Ð³ÑÐ¼"}
+    return t in {"грм", "замена грм", "заміна грм", "комплект грм"}
 
 
 def find_last_service_in_rows(rows, service_type: str):
     if service_type == "oil":
         keywords = [
-            "Ð¼Ð°ÑÐ»Ð¾ Ð² Ð´Ð²Ð¸Ð³Ð°ÑÐµÐ»Ñ",
-            "Ð¼Ð°ÑÐ»ÑÐ½ÑÐ¹ ÑÐ¸Ð»ÑÑÑ",
-            "Ð·Ð°Ð¼ÐµÐ½Ð° Ð¼Ð°ÑÐ»Ð°",
-            "Ð¼Ð¾ÑÐ¾ÑÐ½Ð¾Ðµ Ð¼Ð°ÑÐ»Ð¾",
+            "масло в двигатель",
+            "масляный фильтр",
+            "замена масла",
+            "моторное масло",
         ]
     else:
-        keywords = ["Ð³ÑÐ¼", "ÐºÐ¾Ð¼Ð¿Ð»ÐµÐºÑ Ð³ÑÐ¼", "Ð·Ð°Ð¼ÐµÐ½Ð° Ð³ÑÐ¼", "Ð·Ð°Ð¼Ð°Ð½Ð° Ð³ÑÐ¼"]
+        keywords = ["грм", "комплект грм", "замена грм", "замана грм"]
 
     for r in reversed(rows[7:]):
         if len(r) > 6:
@@ -433,8 +433,8 @@ def build_oil_report():
         cur = get_current_odometer_from_rows(rows)
         remaining = 10000 - (cur - odo)
         icon = oil_status_icon(remaining)
-        out.append(f"{icon} {car} | {service_date} | {odo} | {format_km_value(remaining)} ÐºÐ¼")
-    return "\n".join(out) if out else "ÐÐµÐ¼Ð°Ñ Ð´Ð°Ð½Ð¸Ñ Ð¿Ð¾ Ð·Ð°Ð¼ÑÐ½Ñ Ð¼Ð°ÑÐ»Ð°."
+        out.append(f"{icon} {car} | {service_date} | {odo} | {format_km_value(remaining)} км")
+    return "\n".join(out) if out else "Немає даних по заміні масла."
 
 
 def build_grm_report():
@@ -453,8 +453,8 @@ def build_grm_report():
         cur = get_current_odometer_from_rows(rows)
         remaining = 50000 - (cur - odo)
         icon = grm_status_icon(remaining)
-        out.append(f"{icon} {car} | {service_date} | {odo} | {format_km_value(remaining)} ÐºÐ¼")
-    return "\n".join(out) if out else "ÐÐµÐ¼Ð°Ñ Ð´Ð°Ð½Ð¸Ñ Ð¿Ð¾ Ð·Ð°Ð¼ÑÐ½Ñ ÐÐ Ð."
+        out.append(f"{icon} {car} | {service_date} | {odo} | {format_km_value(remaining)} км")
+    return "\n".join(out) if out else "Немає даних по заміні ГРМ."
 
 
 async def check_notifications(context: ContextTypes.DEFAULT_TYPE):
@@ -471,17 +471,17 @@ async def check_notifications(context: ContextTypes.DEFAULT_TYPE):
         if odo:
             remaining = 10000 - (cur - odo)
             if remaining <= 1000:
-                msgs.append(f"ð {car} â Ð¼Ð°ÑÐ»Ð¾ ÑÐµÑÐµÐ· {format_km_value(remaining)} ÐºÐ¼")
+                msgs.append(f"🚗 {car} — масло через {format_km_value(remaining)} км")
 
         if car not in SKIP_GRM:
             _, odo = find_last_service_in_rows(rows, "grm")
             if odo:
                 remaining = 50000 - (cur - odo)
                 if remaining <= 1000:
-                    msgs.append(f"ð {car} â ÐÐ Ð ÑÐµÑÐµÐ· {format_km_value(remaining)} ÐºÐ¼")
+                    msgs.append(f"🚗 {car} — ГРМ через {format_km_value(remaining)} км")
 
     if msgs:
-        text = "â ï¸ ÐÐ°Ð³Ð°Ð´ÑÐ²Ð°Ð½Ð½Ñ:\n\n" + "\n".join(msgs)
+        text = "⚠️ Нагадування:\n\n" + "\n".join(msgs)
         for uid in ALLOWED_USERS:
             await context.bot.send_message(chat_id=uid, text=text)
 
@@ -559,44 +559,44 @@ def build_prompt(message: str, existing_data: dict | None = None) -> str:
     today = datetime.now().strftime("%d.%m.%y")
     existing_block = ""
     if existing_data:
-        existing_block = f"\nÐ£Ð¶Ðµ Ð¸Ð·Ð²ÐµÑÑÐ½ÑÐµ Ð´Ð°Ð½Ð½ÑÐµ Ð¸Ð· Ð¿ÑÐµÐ´ÑÐ´ÑÑÐ¸Ñ ÑÐ¾Ð¾Ð±ÑÐµÐ½Ð¸Ð¹:\n{json.dumps(existing_data, ensure_ascii=False)}\n"
+        existing_block = f"\nУже известные данные из предыдущих сообщений:\n{json.dumps(existing_data, ensure_ascii=False)}\n"
 
     cars_block = "\n".join(f"{k} -> {VEHICLE_MAP[k]}" for k in KNOWN_CAR_IDS)
 
-    return f"""Ð¢Ñ Ð¿Ð¾Ð¼Ð¾ÑÐ½Ð¸Ðº Ð´Ð»Ñ ÑÑÐµÑÐ° Ð°Ð²ÑÐ¾Ð¿Ð°ÑÐºÐ°. Ð¡ÐµÐ³Ð¾Ð´Ð½Ñ {today}.
+    return f"""Ты помощник для учета автопарка. Сегодня {today}.
 
-Ð¢Ð²Ð¾Ñ Ð·Ð°Ð´Ð°ÑÐ°: ÑÐ°Ð·Ð¾Ð±ÑÐ°ÑÑ ÑÐ¾Ð¾Ð±ÑÐµÐ½Ð¸Ðµ Ð¿Ð¾Ð»ÑÐ·Ð¾Ð²Ð°ÑÐµÐ»Ñ Ð² Ð¡Ð¢Ð ÐÐÐÐ JSON Ð´Ð»Ñ Ð·Ð°Ð¿Ð¸ÑÐ¸ Ð² Google Sheets.
+Твоя задача: разобрать сообщение пользователя в СТРОГИЙ JSON для записи в Google Sheets.
 {existing_block}
-ÐÐ·Ð²ÐµÑÑÐ½ÑÐµ Ð¼Ð°ÑÐ¸Ð½Ñ Ð°Ð²ÑÐ¾Ð¿Ð°ÑÐºÐ°:
+Известные машины автопарка:
 {cars_block}
 
-ÐÑÐ°Ð²Ð¸Ð»Ð°:
-1. ÐÐ¾Ð»ÑÐ·Ð¾Ð²Ð°ÑÐµÐ»Ñ Ð¼Ð¾Ð¶ÐµÑ Ð¿Ð¸ÑÐ°ÑÑ Ð´Ð°Ð½Ð½ÑÐµ Ð² Ð»ÑÐ±Ð¾Ð¼ Ð¿Ð¾ÑÑÐ´ÐºÐµ: Ð¼Ð°ÑÐ¸Ð½Ð°, ÑÑÐ¼Ð¼Ð°, Ð¾Ð´Ð¾Ð¼ÐµÑÑ, Ð¾Ð¿Ð¸ÑÐ°Ð½Ð¸Ðµ, Ð´Ð°ÑÐ°, ÑÐ¸Ð¿ Ð¾Ð¿ÐµÑÐ°ÑÐ¸Ð¸.
-2. ÐÐ¾Ð»ÑÐ·Ð¾Ð²Ð°ÑÐµÐ»Ñ Ð¾Ð±ÑÑÐ½Ð¾ Ð¿Ð¸ÑÐµÑ ÑÐ¾Ð»ÑÐºÐ¾ ÑÐ¸ÑÑÑ Ð¼Ð°ÑÐ¸Ð½Ñ.
-3. car_id Ð² JSON Ð´Ð¾Ð»Ð¶ÐµÐ½ Ð±ÑÑÑ ÑÐ¾Ð»ÑÐºÐ¾ Ð¸Ð· ÑÐ¿Ð¸ÑÐºÐ° Ð¸Ð·Ð²ÐµÑÑÐ½ÑÑ Ð¼Ð°ÑÐ¸Ð½.
-4. ÐÑÐ»Ð¸ Ð´Ð°ÑÐ° Ð½Ðµ ÑÐºÐ°Ð·Ð°Ð½Ð° â Ð¸ÑÐ¿Ð¾Ð»ÑÐ·ÑÐ¹ ÑÐµÐ³Ð¾Ð´Ð½ÑÑÐ½ÑÑ Ð´Ð°ÑÑ Ð² ÑÐ¾ÑÐ¼Ð°ÑÐµ DD.MM.YY.
-5. ÐÐÐÐÐ«Ð ÐÐÐ¯ Ð¢ÐÐÐÐÐ¦Ð« ÐÐÐ¨Ð ÐÐ Ð Ð£Ð¡Ð¡ÐÐÐ Ð¯ÐÐ«ÐÐ.
-6. ÐÑÐ²ÐµÑ Ð´Ð¾Ð»Ð¶ÐµÐ½ Ð±ÑÑÑ Ð¢ÐÐÐ¬ÐÐ JSON, Ð±ÐµÐ· markdown, Ð±ÐµÐ· Ð¿Ð¾ÑÑÐ½ÐµÐ½Ð¸Ð¹.
-7. ÐÑÐ»Ð¸ Ð½Ðµ ÑÐ²Ð°ÑÐ°ÐµÑ Ð²Ð°Ð¶Ð½ÑÑ Ð´Ð°Ð½Ð½ÑÑ â Ð²ÐµÑÐ½Ð¸ missing_fields.
-8. ÐÑÐ»Ð¸ Ð¿Ð¾Ð»ÑÐ·Ð¾Ð²Ð°ÑÐµÐ»Ñ Ð¿Ð¸ÑÐµÑ Ð¿ÑÐ¾ ÑÑÑÐ°Ñ, Ð´Ð¾Ð»Ð³, Ð´Ð¾Ð»Ð¶ÐµÐ½, Ð´Ð¾Ð¶ÐµÐ½ â type = liability_minus.
-9. ÐÑÐ»Ð¸ Ð¿Ð¾Ð»ÑÐ·Ð¾Ð²Ð°ÑÐµÐ»Ñ Ð¿Ð¸ÑÐµÑ Ð²Ð·ÑÐ», Ð¿ÑÐ¸Ð½ÑÐ», Ð¿Ð¾Ð³Ð°ÑÐ¸Ð», Ð´Ð°Ð» â type = liability_plus.
-10. ÐÐ»Ñ liability_minus/liability_plus odometer Ð½Ðµ Ð½ÑÐ¶ÐµÐ½.
-11. ÐÑÐ»Ð¸ Ð¿Ð¾Ð»ÑÐ·Ð¾Ð²Ð°ÑÐµÐ»Ñ Ð¿Ð¸ÑÐµÑ Ð¢Ð Ð¸Ð»Ð¸ Ð¿Ð»Ð°Ð½Ð¾Ð²Ð¾Ðµ Ð¢Ð, description = Ð¢Ð Ð¸ amount Ð¼Ð¾Ð¶ÐµÑ Ð±ÑÑÑ null.
-12. ÐÑÐ»Ð¸ Ð² Ð¾Ð´Ð½Ð¾Ð¼ ÑÐ¾Ð¾Ð±ÑÐµÐ½Ð¸Ð¸ Ð¾Ð´Ð½Ð° Ð¼Ð°ÑÐ¸Ð½Ð° Ð¸ Ð´Ð²Ðµ ÑÑÐ¼Ð¼Ñ Ð¿ÑÐ¸ ÑÐ»Ð¾Ð²Ð°Ñ Ð²Ð·ÑÐ»/Ð¿ÑÐ¸Ð½ÑÐ»/Ð¿Ð¾Ð³Ð°ÑÐ¸Ð»/Ð´Ð°Ð», Ð±Ð¾Ð»ÑÑÐ°Ñ ÑÑÐ¼Ð¼Ð° â income, Ð¼ÐµÐ½ÑÑÐ°Ñ â liability_plus.
+Правила:
+1. Пользователь может писать данные в любом порядке: машина, сумма, одометр, описание, дата, тип операции.
+2. Пользователь обычно пишет только цифры машины.
+3. car_id в JSON должен быть только из списка известных машин.
+4. Если дата не указана — используй сегодняшнюю дату в формате DD.MM.YY.
+5. ДАННЫЕ ДЛЯ ТАБЛИЦЫ ПИШИ НА РУССКОМ ЯЗЫКЕ.
+6. Ответ должен быть ТОЛЬКО JSON, без markdown, без пояснений.
+7. Если не хватает важных данных — верни missing_fields.
+8. Если пользователь пишет про штраф, долг, должен, дожен — type = liability_minus.
+9. Если пользователь пишет взял, принял, погасил, дал — type = liability_plus.
+10. Для liability_minus/liability_plus odometer не нужен.
+11. Если пользователь пишет ТО или плановое ТО, description = ТО и amount может быть null.
+12. Если в одном сообщении одна машина и две суммы при словах взял/принял/погасил/дал, большая сумма — income, меньшая — liability_plus.
 
-ÐÐµÑÐ½Ð¸ JSON ÑÑÑÐ¾Ð³Ð¾ ÑÐ°ÐºÐ¾Ð³Ð¾ Ð²Ð¸Ð´Ð°:
+Верни JSON строго такого вида:
 {{
-  "type": "expense" Ð¸Ð»Ð¸ "income" Ð¸Ð»Ð¸ "liability_minus" Ð¸Ð»Ð¸ "liability_plus" Ð¸Ð»Ð¸ null,
-  "car_id": "8730" Ð¸Ð»Ð¸ null,
+  "type": "expense" или "income" или "liability_minus" или "liability_plus" или null,
+  "car_id": "8730" или null,
   "date": "DD.MM.YY",
   "amount": 370,
-  "description": "ÐÐ¾Ð»Ð¾Ð´ÐºÐ¸ ÐÐ¾Ñ",
+  "description": "Колодки Бош",
   "odometer": 470420,
   "notes": null,
   "missing_fields": []
 }}
 
-Ð¡Ð¾Ð¾Ð±ÑÐµÐ½Ð¸Ðµ Ð¿Ð¾Ð»ÑÐ·Ð¾Ð²Ð°ÑÐµÐ»Ñ:
+Сообщение пользователя:
 "{message}"
 """
 
@@ -620,7 +620,7 @@ def ask_openai(prompt: str) -> dict:
         model="gpt-4o-mini",
         temperature=0,
         messages=[
-            {"role": "system", "content": "ÐÐ¾Ð·Ð²ÑÐ°ÑÐ°Ð¹ ÑÐ¾Ð»ÑÐºÐ¾ Ð²Ð°Ð»Ð¸Ð´Ð½ÑÐ¹ JSON. ÐÐµÐ· Ð¿Ð¾ÑÑÐ½ÐµÐ½Ð¸Ð¹. ÐÐµÐ· markdown. ÐÐµÐ· ÑÐµÐºÑÑÐ° Ð´Ð¾ Ð¸ Ð¿Ð¾ÑÐ»Ðµ JSON."},
+            {"role": "system", "content": "Возвращай только валидный JSON. Без пояснений. Без markdown. Без текста до и после JSON."},
             {"role": "user", "content": prompt},
         ],
     )
@@ -640,8 +640,8 @@ def ask_ai(message: str, existing_data: dict | None = None) -> dict:
             return ask_openai(prompt)
         except Exception as e:
             logger.error(f"OpenAI error: {e}")
-            return {"error": f"AI Ð½ÐµÐ´Ð¾ÑÑÑÐ¿Ð½Ð¸Ð¹: {str(e)}"}
-    return {"error": "ÐÐµ Ð·Ð°Ð´Ð°Ð½Ñ CLAUDE_API_KEY Ñ OPENAI_API_KEY"}
+            return {"error": f"AI недоступний: {str(e)}"}
+    return {"error": "Не задані CLAUDE_API_KEY і OPENAI_API_KEY"}
 
 
 def apply_special_cases(data: dict, raw_text: str) -> dict:
@@ -652,7 +652,7 @@ def apply_special_cases(data: dict, raw_text: str) -> dict:
         if not data.get("type"):
             data["type"] = "expense"
         if not data.get("description"):
-            data["description"] = "Ð¢Ð"
+            data["description"] = "ТО"
         if data.get("amount") in ("", None):
             data["amount"] = 0
     return data
@@ -661,7 +661,7 @@ def apply_special_cases(data: dict, raw_text: str) -> dict:
 def compute_missing_fields(data: dict, raw_text: str = "") -> list[str]:
     missing = []
     op_type = data.get("type")
-    to_case = is_to_phrase(raw_text) or str(data.get("description", "")).lower().strip() in {"ÑÐ¾", "Ð¿Ð»Ð°Ð½Ð¾Ð²Ð¾Ðµ ÑÐ¾", "Ð¿Ð»Ð°Ð½Ð¾Ð²Ðµ ÑÐ¾"}
+    to_case = is_to_phrase(raw_text) or str(data.get("description", "")).lower().strip() in {"то", "плановое то", "планове то"}
     if not op_type:
         missing.append("type")
     if not data.get("car_id"):
@@ -677,16 +677,16 @@ def compute_missing_fields(data: dict, raw_text: str = "") -> list[str]:
 
 def ask_for_next_missing_field(missing_fields: list[str]) -> str:
     if not missing_fields:
-        return "Ð£ÑÐ¾ÑÐ½Ð¸, Ð±ÑÐ´Ñ Ð»Ð°ÑÐºÐ°, Ð²ÑÐ´ÑÑÑÐ½Ñ Ð´Ð°Ð½Ñ."
+        return "Уточни, будь ласка, відсутні дані."
     field = missing_fields[0]
     mapping = {
-        "type": "ÐÐºÐ°Ð¶Ð¸, Ð±ÑÐ´Ñ Ð»Ð°ÑÐºÐ°, ÑÐµ Ð¿ÑÐ¸ÑÑÐ´, Ð²Ð¸ÑÑÐ°ÑÐ°, ÑÑÑÐ°Ñ ÑÐ¸ Ð±Ð¾ÑÐ³.",
-        "car_id": f"ÐÐºÐ°Ð¶Ð¸ Ð½Ð¾Ð¼ÐµÑ Ð¼Ð°ÑÐ¸Ð½Ð¸. ÐÐ¾ÑÑÑÐ¿Ð½Ñ: {', '.join(KNOWN_CAR_IDS)}",
-        "amount": "ÐÐºÐ°Ð¶Ð¸ ÑÑÐ¼Ñ Ð² Ð³ÑÐ¸Ð²Ð½ÑÑ.",
-        "description": "ÐÐºÐ°Ð¶Ð¸ Ð¾Ð¿Ð¸Ñ Ð°Ð±Ð¾ Ð¿ÑÐ¸ÑÐ¸Ð½Ñ.",
-        "odometer": "ÐÐµÐ½Ñ Ð´Ð¾Ð´Ð°ÑÐ¸ ÑÐµÑÐµÐ´Ð½ÑÐ¾ÑÑÐ°ÑÐ¸ÑÑÐ¸ÑÐ½Ð¸Ð¹ Ð¿ÑÐ¾Ð±ÑÐ³? ÐÐ°Ð¿Ð¸ÑÐ¸ Â«ÑÐ°ÐºÂ» Ð°Ð±Ð¾ Ð¿ÑÐ¾ÑÑÐ¾ Ð½Ð°Ð´ÑÑÐ»Ð¸ ÑÐ¸ÑÑÐ¸ Ð¾Ð´Ð¾Ð¼ÐµÑÑÐ°.",
+        "type": "Вкажи, будь ласка, це прихід, витрата, штраф чи борг.",
+        "car_id": f"Вкажи номер машини. Доступні: {', '.join(KNOWN_CAR_IDS)}",
+        "amount": "Вкажи суму в гривнях.",
+        "description": "Вкажи опис або причину.",
+        "odometer": "Мені додати середньостатистичний пробіг? Напиши «так» або просто надішли цифри одометра.",
     }
-    return mapping.get(field, "Ð£ÑÐ¾ÑÐ½Ð¸, Ð±ÑÐ´Ñ Ð»Ð°ÑÐºÐ°, Ð²ÑÐ´ÑÑÑÐ½Ñ Ð´Ð°Ð½Ñ.")
+    return mapping.get(field, "Уточни, будь ласка, відсутні дані.")
 
 
 # ================= BUSINESS LOGIC =================
@@ -694,29 +694,29 @@ def ask_for_next_missing_field(missing_fields: list[str]) -> str:
 def build_liability_description(op_type: str, raw_text: str, ai_description: str | None) -> str:
     t = str(raw_text or "").lower()
     desc = str(ai_description or "").strip()
-    if "Ð´ÑÐ¿" in t:
-        base = "Ð·Ð° ÐÐ¢Ð"
-    elif "ÑÐµÐ»ÐµÐ²Ð¸Ð·" in t:
-        base = "Ð·Ð° ÑÐµÐ»ÐµÐ²Ð¸Ð·Ð¾Ñ"
-    elif "Ð¿Ð°ÑÐºÐ¾Ð²" in t:
-        base = "Ð·Ð° Ð¿Ð°ÑÐºÐ¾Ð²ÐºÑ"
-    elif "Ð¿ÑÐµÐ²ÑÑ" in t:
-        base = "Ð·Ð° Ð¿ÑÐµÐ²ÑÑÐµÐ½Ð¸Ðµ"
-    elif "ÑÑÑÐ°Ñ" in t and op_type == "liability_plus":
-        base = "Ð·Ð° ÑÑÑÐ°Ñ"
+    if "дтп" in t:
+        base = "за ДТП"
+    elif "телевиз" in t:
+        base = "за телевизор"
+    elif "парков" in t:
+        base = "за парковку"
+    elif "превыш" in t:
+        base = "за превышение"
+    elif "штраф" in t and op_type == "liability_plus":
+        base = "за штраф"
     elif desc:
-        base = desc if desc.lower().startswith("Ð·Ð° ") else f"Ð·Ð° {desc}"
+        base = desc if desc.lower().startswith("за ") else f"за {desc}"
     else:
         base = ""
 
     if op_type == "liability_minus":
-        return (f"ÑÑÑÐ°Ñ {base}" if "ÑÑÑÐ°Ñ" in t else f"Ð´Ð¾Ð»Ð³ {base}").strip()
-    return f"Ð¿Ð¾Ð³Ð°ÑÐµÐ½Ð¸Ðµ Ð´Ð¾Ð»Ð³Ð° {base}".strip()
+        return (f"штраф {base}" if "штраф" in t else f"долг {base}").strip()
+    return f"погашение долга {base}".strip()
 
 
 def detect_month_summary_request(text: str) -> str | None:
     t = str(text or "").lower()
-    if any(x in t for x in ["Ð¼ÑÑÑÑÑ", "Ð¼ÐµÑÑÑ", "Ð¿Ð¾ÑÐ¾ÑÐ½Ð¸Ð¹ Ð¼ÑÑÑÑÑ", "ÑÐµÐºÑÑÐ¸Ð¹ Ð¼ÐµÑÑÑ"]):
+    if any(x in t for x in ["місяць", "месяц", "поточний місяць", "текущий месяц"]):
         for car_id in KNOWN_CAR_IDS:
             if re.search(rf"(?<!\d){re.escape(car_id)}(?!\d)", text):
                 return car_id
@@ -727,7 +727,7 @@ def monthly_summary(car_id: str) -> str:
     spreadsheet = get_sheet()
     ws = get_matching_worksheet(spreadsheet, car_id)
     if not ws:
-        return f"â ÐÐ°ÑÐ¸Ð½Ñ {car_id} Ð½Ðµ Ð·Ð½Ð°Ð¹Ð´ÐµÐ½Ð¾ Ð² ÑÐ°Ð±Ð»Ð¸ÑÑ"
+        return f"❌ Машину {car_id} не знайдено в таблиці"
 
     today = datetime.now()
     month = today.month
@@ -761,10 +761,10 @@ def monthly_summary(car_id: str) -> str:
                     pass
 
     return (
-        f"ð ÐÐ° Ð¿Ð¾ÑÐ¾ÑÐ½Ð¸Ð¹ Ð¼ÑÑÑÑÑ Ð¿Ð¾ {car_id}:\n"
-        f"ð° ÐÐ¾ÑÑÐ´: {int(income_sum) if income_sum.is_integer() else round(income_sum, 2)} Ð³ÑÐ½\n"
-        f"ð¸ ÐÐ¸ÑÑÐ°ÑÐ¸: {int(expense_sum) if expense_sum.is_integer() else round(expense_sum, 2)} Ð³ÑÐ½\n"
-        f"ð ÐÐ°Ð»Ð¸ÑÐ¾Ðº Ð±Ð¾ÑÐ³Ñ: {int(liability_sum) if liability_sum.is_integer() else round(liability_sum, 2)} Ð³ÑÐ½"
+        f"📊 За поточний місяць по {car_id}:\n"
+        f"💰 Дохід: {int(income_sum) if income_sum.is_integer() else round(income_sum, 2)} грн\n"
+        f"💸 Витрати: {int(expense_sum) if expense_sum.is_integer() else round(expense_sum, 2)} грн\n"
+        f"📌 Залишок боргу: {int(liability_sum) if liability_sum.is_integer() else round(liability_sum, 2)} грн"
     )
 
 
@@ -856,30 +856,30 @@ def write_single_action_to_sheet(data: dict, raw_text: str = "") -> str:
     try:
         usd_rate = get_usd_black_rate_dnipro()
         if usd_rate:
-            usd_note = f"\nð± ÐÑÑÑ USD: {usd_rate}"
+            usd_note = f"\n💱 Курс USD: {usd_rate}"
     except Exception as e:
         logger.error(f"USD rate error: {e}")
-        usd_note = "\nâ ï¸ ÐÑÑÑ USD Ð½Ðµ Ð²Ð´Ð°Ð»Ð¾ÑÑ Ð¾ÑÑÐ¸Ð¼Ð°ÑÐ¸"
+        usd_note = "\n⚠️ Курс USD не вдалося отримати"
 
     ws = get_matching_worksheet(spreadsheet, car_id)
     if not ws:
-        return f"â ÐÐ°ÑÐ¸Ð½Ñ {full_plate} Ð½Ðµ Ð·Ð½Ð°Ð¹Ð´ÐµÐ½Ð¾ Ð² ÑÐ°Ð±Ð»Ð¸ÑÑ"
+        return f"❌ Машину {full_plate} не знайдено в таблиці"
 
     sheet_name = ws.title
 
     if op_type == "expense":
         desc_lower = str(description).lower().strip()
-        is_to_bundle_case = desc_lower in ["ÑÐ¾", "Ð¿Ð»Ð°Ð½Ð¾Ð²Ð¾Ðµ ÑÐ¾", "Ð¿Ð»Ð°Ð½Ð¾Ð²Ðµ ÑÐ¾"] or is_to_phrase(description)
+        is_to_bundle_case = desc_lower in ["то", "плановое то", "планове то"] or is_to_phrase(description)
 
         if is_to_bundle_case:
             start_row, end_row, total_amount = write_expense_rows(ws, date_value, odometer, TO_BUNDLE, usd_rate, odometer_estimated)
             return (
-                f"â Ð¢Ð Ð²Ð½ÐµÑÐµÐ½Ð¾!\n"
-                f"ð ÐÐ°ÑÐ¸Ð½Ð°: {full_plate}\n"
-                f"ð§¾ ÐÐ¾Ð´Ð°Ð½Ð¾ 5 ÑÑÐ´ÐºÑÐ²\n"
-                f"ð¸ ÐÐ°Ð³Ð°Ð»ÑÐ½Ð° ÑÑÐ¼Ð°: {total_amount} Ð³ÑÐ½\n"
-                f"ð {date_value}\n"
-                f"ð ÐÐ½ÐµÑÐµÐ½Ð¾: Ð»Ð¸ÑÑ '{sheet_name}', ÑÑÐ´ÐºÐ¸ {start_row}-{end_row}, ÑÑÐ¾Ð²Ð¿ÑÑ E:I{usd_note}"
+                f"✅ ТО внесено!\n"
+                f"🚘 Машина: {full_plate}\n"
+                f"🧾 Додано 5 рядків\n"
+                f"💸 Загальна сума: {total_amount} грн\n"
+                f"📅 {date_value}\n"
+                f"📍 Внесено: лист '{sheet_name}', рядки {start_row}-{end_row}, стовпці E:I{usd_note}"
             )
 
         next_row = get_next_expense_row(ws)
@@ -890,12 +890,12 @@ def write_single_action_to_sheet(data: dict, raw_text: str = "") -> str:
         if odometer_estimated:
             mark_cell_yellow(ws, f"F{next_row}")
         return (
-            f"â ÐÐ¸ÑÑÐ°ÑÐ° Ð²Ð½ÐµÑÐµÐ½Ð°!\n"
-            f"ð ÐÐ°ÑÐ¸Ð½Ð°: {full_plate}\n"
-            f"ð {description}\n"
-            f"ð¸ {amount} Ð³ÑÐ½\n"
-            f"ð {date_value}\n"
-            f"ð ÐÐ½ÐµÑÐµÐ½Ð¾: Ð»Ð¸ÑÑ '{sheet_name}', ÑÑÐ´Ð¾Ðº {next_row}, ÑÑÐ¾Ð²Ð¿ÑÑ E:I{usd_note}"
+            f"✅ Витрата внесена!\n"
+            f"🚘 Машина: {full_plate}\n"
+            f"📋 {description}\n"
+            f"💸 {amount} грн\n"
+            f"📅 {date_value}\n"
+            f"📍 Внесено: лист '{sheet_name}', рядок {next_row}, стовпці E:I{usd_note}"
         )
 
     if op_type == "income":
@@ -914,14 +914,14 @@ def write_single_action_to_sheet(data: dict, raw_text: str = "") -> str:
         apply_blue_text(ws, update_range)
         if odometer_estimated:
             mark_cell_yellow(ws, f"L{next_row}")
-        delta_text = f"\nð Ð ÑÐ·Ð½Ð¸ÑÑ Ð¿ÑÐ¾Ð±ÑÐ³Ñ: {mileage_delta}" if mileage_delta != "" else ""
+        delta_text = f"\n📈 Різниця пробігу: {mileage_delta}" if mileage_delta != "" else ""
         return (
-            f"â ÐÐ¾ÑÑÐ´ Ð²Ð½ÐµÑÐµÐ½Ð¾!\n"
-            f"ð ÐÐ°ÑÐ¸Ð½Ð°: {full_plate}\n"
-            f"ð° {amount} Ð³ÑÐ½\n"
-            f"ð {date_value}\n"
-            f"ð ÐÐ´Ð¾Ð¼ÐµÑÑ: {odometer}\n"
-            f"ð ÐÐ½ÐµÑÐµÐ½Ð¾: Ð»Ð¸ÑÑ '{sheet_name}', ÑÑÐ´Ð¾Ðº {next_row}, ÑÑÐ¾Ð²Ð¿ÑÑ K:O{delta_text}{usd_note}"
+            f"✅ Дохід внесено!\n"
+            f"🚘 Машина: {full_plate}\n"
+            f"💰 {amount} грн\n"
+            f"📅 {date_value}\n"
+            f"📍 Одометр: {odometer}\n"
+            f"📍 Внесено: лист '{sheet_name}', рядок {next_row}, стовпці K:O{delta_text}{usd_note}"
         )
 
     if op_type in ["liability_minus", "liability_plus"]:
@@ -931,16 +931,16 @@ def write_single_action_to_sheet(data: dict, raw_text: str = "") -> str:
         update_range = f"K{next_row}:Q{next_row}"
         ws.update(update_range, [[date_value, "", "", "", "", sign_amount, liability_desc]])
         apply_blue_text(ws, update_range)
-        label = "Ð¨ÑÑÐ°Ñ/Ð±Ð¾ÑÐ³" if op_type == "liability_minus" else "ÐÐ¾Ð³Ð°ÑÐµÐ½Ð½Ñ/Ð½Ð°Ð´ÑÐ¾Ð´Ð¶ÐµÐ½Ð½Ñ"
+        label = "Штраф/борг" if op_type == "liability_minus" else "Погашення/надходження"
         return (
-            f"â {label} Ð²Ð½ÐµÑÐµÐ½Ð¾!\n"
-            f"ð ÐÐ°ÑÐ¸Ð½Ð°: {full_plate}\n"
-            f"ðµ {sign_amount} Ð³ÑÐ½\n"
-            f"ð {liability_desc}\n"
-            f"ð ÐÐ½ÐµÑÐµÐ½Ð¾: Ð»Ð¸ÑÑ '{sheet_name}', ÑÑÐ´Ð¾Ðº {next_row}, ÑÑÐ¾Ð²Ð¿ÑÑ P:Q"
+            f"✅ {label} внесено!\n"
+            f"🚘 Машина: {full_plate}\n"
+            f"💵 {sign_amount} грн\n"
+            f"📝 {liability_desc}\n"
+            f"📍 Внесено: лист '{sheet_name}', рядок {next_row}, стовпці P:Q"
         )
 
-    return "â ÐÐµÐ²ÑÐ´Ð¾Ð¼Ð¸Ð¹ ÑÐ¸Ð¿ Ð¾Ð¿ÐµÑÐ°ÑÑÑ"
+    return "❌ Невідомий тип операції"
 
 
 def write_actions_to_sheet(actions: list[dict], raw_text: str = "") -> str:
@@ -948,15 +948,15 @@ def write_actions_to_sheet(actions: list[dict], raw_text: str = "") -> str:
 
 
 def is_yes_statistical(text: str) -> bool:
-    return text.lower().strip() in ["ÑÐ°Ðº", "Ð´Ð°", "yes", "Ð¾Ðº", "Ð¾ÐºÐµÐ¹", "Ð°Ð³Ð°"]
+    return text.lower().strip() in ["так", "да", "yes", "ок", "окей", "ага"]
 
 
 def is_yes_confirm(text: str) -> bool:
-    return str(text).lower().strip() in ["ÑÐ°Ðº", "Ð´Ð°", "yes", "Ð½Ð¾Ð²Ð¸Ð¹", "Ð½Ð¾Ð²Ð°Ñ", "Ð½Ð¾Ð²Ð¾Ðµ"]
+    return str(text).lower().strip() in ["так", "да", "yes", "новий", "новая", "новое"]
 
 
 def is_no_confirm(text: str) -> bool:
-    return str(text).lower().strip() in ["Ð½Ñ", "Ð½ÐµÑ", "Ð´ÑÐ±Ð»Ñ", "ÑÐºÐ°ÑÑÐ²Ð°ÑÐ¸", "Ð¾ÑÐ¼ÐµÐ½Ð°", "cancel"]
+    return str(text).lower().strip() in ["ні", "нет", "дубль", "скасувати", "отмена", "cancel"]
 
 
 def actions_need_odometer(actions: list[dict]) -> bool:
@@ -990,7 +990,7 @@ def heuristic_multi_parse(text: str):
             else:
                 numbers = find_all_numbers(part)
                 amounts = [n for n in numbers if str(n) != shared_car_id and str(n) not in KNOWN_CAR_IDS]
-                if "Ð¿ÑÐ¸ÑÐ¾Ð´" in part.lower() and amounts:
+                if "приход" in part.lower() and amounts:
                     actions.append({
                         "type": "income",
                         "car_id": shared_car_id,
@@ -1031,7 +1031,7 @@ def heuristic_multi_parse(text: str):
             "car_id": shared_car_id,
             "date": normalize_date_short(None),
             "amount": 0,
-            "description": "Ð¢Ð",
+            "description": "ТО",
             "odometer": None,
             "notes": None,
             "missing_fields": [],
@@ -1099,7 +1099,7 @@ def heuristic_multi_parse(text: str):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if ALLOWED_USERS and user_id not in ALLOWED_USERS:
-        await update.message.reply_text("â ÐÐ¾ÑÑÑÐ¿ Ð·Ð°Ð±Ð¾ÑÐ¾Ð½ÐµÐ½Ð¾")
+        await update.message.reply_text("⛔ Доступ заборонено")
         return
 
     text = (update.message.text or "").strip()
@@ -1107,13 +1107,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Incoming message from {user_id}: {text}")
 
     try:
-        # Ð¢Ð / ÐÐ Ð reports without car
+        # ТО / ГРМ reports without car
         if is_oil_report_request(text):
-            await update.message.reply_text("ð¢ Ð¡ÑÐ°Ð½ Ð¼Ð°ÑÐ»Ð°:\n\n" + build_oil_report())
+            await update.message.reply_text("🛢 Стан масла:\n\n" + build_oil_report())
             return
 
         if is_grm_report_request(text):
-            await update.message.reply_text("âï¸ Ð¡ÑÐ°Ð½ ÐÐ Ð:\n\n" + build_grm_report())
+            await update.message.reply_text("⚙️ Стан ГРМ:\n\n" + build_grm_report())
             return
 
         if context.user_data.get("waiting_duplicate_confirm"):
@@ -1127,9 +1127,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if is_no_confirm(text):
                 context.user_data.pop("waiting_duplicate_confirm", None)
                 context.user_data.pop("pending_actions_after_duplicate", None)
-                await update.message.reply_text("â ÐÐ°Ð¿Ð¸Ñ ÑÐºÐ°ÑÐ¾Ð²Ð°Ð½Ð¾ ÑÐº Ð´ÑÐ±Ð»Ñ.")
+                await update.message.reply_text("✅ Запис скасовано як дубль.")
                 return
-            await update.message.reply_text("ÐÐ°Ð¿Ð¸ÑÐ¸ Â«Ð½Ð¾Ð²Ð¸Ð¹Â» Ð°Ð±Ð¾ Â«Ð´ÑÐ±Ð»ÑÂ».")
+            await update.message.reply_text("Напиши «новий» або «дубль».")
             return
 
         if context.user_data.get("waiting_odometer_anomaly_confirm"):
@@ -1145,9 +1145,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data["waiting_odometer_choice_actions"] = True
                 context.user_data["pending_actions"] = pending_actions
                 context.user_data.pop("pending_actions_after_anomaly", None)
-                await update.message.reply_text("ÐÐ¾Ð±ÑÐµ. ÐÐ°Ð´ÑÑÐ»Ð¸ Ð¿ÑÐ°Ð²Ð¸Ð»ÑÐ½Ð¸Ð¹ Ð¾Ð´Ð¾Ð¼ÐµÑÑ Ð°Ð±Ð¾ Ð½Ð°Ð¿Ð¸ÑÐ¸ Â«ÑÐ°ÐºÂ», ÑÐ¾Ð± Ñ Ð¿ÑÐ´ÑÑÐ°Ð²Ð¸Ð² ÑÐµÑÐµÐ´Ð½ÑÐ¾ÑÑÐ°ÑÐ¸ÑÑÐ¸ÑÐ½Ð¸Ð¹.")
+                await update.message.reply_text("Добре. Надішли правильний одометр або напиши «так», щоб я підставив середньостатистичний.")
                 return
-            await update.message.reply_text("ÐÐ°Ð¿Ð¸ÑÐ¸ Â«ÑÐ°ÐºÂ» Ð´Ð»Ñ Ð¿ÑÐ´ÑÐ²ÐµÑÐ´Ð¶ÐµÐ½Ð½Ñ Ð°Ð±Ð¾ Â«Ð½ÑÂ» Ð´Ð»Ñ ÑÐºÐ°ÑÑÐ²Ð°Ð½Ð½Ñ.")
+            await update.message.reply_text("Напиши «так» для підтвердження або «ні» для скасування.")
             return
 
         if context.user_data.get("waiting_odometer_choice_actions"):
@@ -1166,7 +1166,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if ws and odometer_is_anomalous(ws, numeric_odo, first_action.get("date")):
                         context.user_data["waiting_odometer_anomaly_confirm"] = True
                         context.user_data["pending_actions_after_anomaly"] = pending_actions
-                        await update.message.reply_text("â ï¸ ÐÑÐ¾Ð±ÑÐ³ Ð²Ð¸Ð³Ð»ÑÐ´Ð°Ñ Ð½ÐµÑÐ¸Ð¿Ð¾Ð²Ð¾ Ð²ÐµÐ»Ð¸ÐºÐ¸Ð¼. ÐÑÐ´ÑÐ²ÐµÑÐ´Ð¸ÑÐ¸?")
+                        await update.message.reply_text("⚠️ Пробіг виглядає нетипово великим. Підтвердити?")
                         return
 
                 spreadsheet = get_sheet()
@@ -1175,7 +1175,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if ws and detect_duplicate(ws, action, raw_text=text):
                         context.user_data["waiting_duplicate_confirm"] = True
                         context.user_data["pending_actions_after_duplicate"] = pending_actions
-                        await update.message.reply_text("â Ð¦Ðµ Ð½Ð¾Ð²Ð¸Ð¹ Ð·Ð°Ð¿Ð¸Ñ ÑÐ¸ Ð´ÑÐ±Ð»Ñ Ð¿Ð¾Ð¿ÐµÑÐµÐ´Ð½ÑÐ¾Ð³Ð¾?")
+                        await update.message.reply_text("❓ Це новий запис чи дубль попереднього?")
                         return
 
                 result = write_actions_to_sheet(pending_actions, raw_text=text)
@@ -1184,7 +1184,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if is_yes_statistical(text):
                 if not pending_actions:
-                    await update.message.reply_text("ÐÐµÐ¼Ð°Ñ Ð´Ð°Ð½Ð¸Ñ Ð´Ð»Ñ Ð¾Ð±ÑÐ¾Ð±ÐºÐ¸.")
+                    await update.message.reply_text("Немає даних для обробки.")
                     return
                 first_action = next((a for a in pending_actions if a.get("type") in ["expense", "income"]), None)
                 if not first_action:
@@ -1195,7 +1195,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not estimated:
                     context.user_data.pop("waiting_odometer_choice_actions", None)
                     context.user_data.pop("pending_actions", None)
-                    await update.message.reply_text("ÐÐµ Ð²Ð´Ð°Ð»Ð¾ÑÑ Ð¾Ð±ÑÐ¸ÑÐ»Ð¸ÑÐ¸ ÑÐµÑÐµÐ´Ð½ÑÐ¾ÑÑÐ°ÑÐ¸ÑÑÐ¸ÑÐ½Ð¸Ð¹ Ð¿ÑÐ¾Ð±ÑÐ³. ÐÐ°Ð´ÑÑÐ»Ð¸, Ð±ÑÐ´Ñ Ð»Ð°ÑÐºÐ°, ÑÐ¸ÑÑÐ¸ Ð¾Ð´Ð¾Ð¼ÐµÑÑÐ°.")
+                    await update.message.reply_text("Не вдалося обчислити середньостатистичний пробіг. Надішли, будь ласка, цифри одометра.")
                     return
                 fill_odometer_for_actions(pending_actions, estimated, estimated=True)
                 context.user_data.pop("waiting_odometer_choice_actions", None)
@@ -1207,14 +1207,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if ws and detect_duplicate(ws, action, raw_text=text):
                         context.user_data["waiting_duplicate_confirm"] = True
                         context.user_data["pending_actions_after_duplicate"] = pending_actions
-                        await update.message.reply_text("â Ð¦Ðµ Ð½Ð¾Ð²Ð¸Ð¹ Ð·Ð°Ð¿Ð¸Ñ ÑÐ¸ Ð´ÑÐ±Ð»Ñ Ð¿Ð¾Ð¿ÐµÑÐµÐ´Ð½ÑÐ¾Ð³Ð¾?")
+                        await update.message.reply_text("❓ Це новий запис чи дубль попереднього?")
                         return
 
                 result = write_actions_to_sheet(pending_actions, raw_text=text)
                 await update.message.reply_text(result)
                 return
 
-            await update.message.reply_text("ÐÐ°Ð¿Ð¸ÑÐ¸ Â«ÑÐ°ÐºÂ», ÑÐºÑÐ¾ Ð¼ÐµÐ½Ñ Ð´Ð¾Ð´Ð°ÑÐ¸ ÑÐµÑÐµÐ´Ð½ÑÐ¾ÑÑÐ°ÑÐ¸ÑÑÐ¸ÑÐ½Ð¸Ð¹ Ð¿ÑÐ¾Ð±ÑÐ³, Ð°Ð±Ð¾ Ð¿ÑÐ¾ÑÑÐ¾ Ð½Ð°Ð´ÑÑÐ»Ð¸ ÑÐ¸ÑÑÐ¸ Ð¾Ð´Ð¾Ð¼ÐµÑÑÐ°.")
+            await update.message.reply_text("Напиши «так», якщо мені додати середньостатистичний пробіг, або просто надішли цифри одометра.")
             return
 
         if context.user_data.get("waiting_odometer_choice"):
@@ -1234,13 +1234,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     context.user_data["waiting_odometer_anomaly_confirm"] = True
                     context.user_data["pending_actions_after_anomaly"] = [pending_data]
                     context.user_data.pop("pending_data", None)
-                    await update.message.reply_text("â ï¸ ÐÑÐ¾Ð±ÑÐ³ Ð²Ð¸Ð³Ð»ÑÐ´Ð°Ñ Ð½ÐµÑÐ¸Ð¿Ð¾Ð²Ð¾ Ð²ÐµÐ»Ð¸ÐºÐ¸Ð¼. ÐÑÐ´ÑÐ²ÐµÑÐ´Ð¸ÑÐ¸?")
+                    await update.message.reply_text("⚠️ Пробіг виглядає нетипово великим. Підтвердити?")
                     return
                 if ws and detect_duplicate(ws, pending_data, raw_text=text):
                     context.user_data["waiting_duplicate_confirm"] = True
                     context.user_data["pending_actions_after_duplicate"] = [pending_data]
                     context.user_data.pop("pending_data", None)
-                    await update.message.reply_text("â Ð¦Ðµ Ð½Ð¾Ð²Ð¸Ð¹ Ð·Ð°Ð¿Ð¸Ñ ÑÐ¸ Ð´ÑÐ±Ð»Ñ Ð¿Ð¾Ð¿ÐµÑÐµÐ´Ð½ÑÐ¾Ð³Ð¾?")
+                    await update.message.reply_text("❓ Це новий запис чи дубль попереднього?")
                     return
                 result = write_single_action_to_sheet(pending_data, raw_text=text)
                 context.user_data.pop("pending_data", None)
@@ -1252,12 +1252,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 operation_date = pending_data.get("date")
                 if not car_id:
                     context.user_data.pop("waiting_odometer_choice", None)
-                    await update.message.reply_text("Ð¡Ð¿Ð¾ÑÐ°ÑÐºÑ Ð²ÐºÐ°Ð¶Ð¸ Ð½Ð¾Ð¼ÐµÑ Ð¼Ð°ÑÐ¸Ð½Ð¸.")
+                    await update.message.reply_text("Спочатку вкажи номер машини.")
                     return
                 estimated = estimate_odometer_for_car(car_id, operation_date)
                 if not estimated:
                     context.user_data.pop("waiting_odometer_choice", None)
-                    await update.message.reply_text("ÐÐµ Ð²Ð´Ð°Ð»Ð¾ÑÑ Ð¾Ð±ÑÐ¸ÑÐ»Ð¸ÑÐ¸ ÑÐµÑÐµÐ´Ð½ÑÐ¾ÑÑÐ°ÑÐ¸ÑÑÐ¸ÑÐ½Ð¸Ð¹ Ð¿ÑÐ¾Ð±ÑÐ³. ÐÐ°Ð´ÑÑÐ»Ð¸, Ð±ÑÐ´Ñ Ð»Ð°ÑÐºÐ°, ÑÐ¸ÑÑÐ¸ Ð¾Ð´Ð¾Ð¼ÐµÑÑÐ°.")
+                    await update.message.reply_text("Не вдалося обчислити середньостатистичний пробіг. Надішли, будь ласка, цифри одометра.")
                     return
                 pending_data["odometer"] = estimated
                 pending_data["odometer_estimated"] = True
@@ -1271,14 +1271,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     context.user_data["waiting_duplicate_confirm"] = True
                     context.user_data["pending_actions_after_duplicate"] = [pending_data]
                     context.user_data.pop("pending_data", None)
-                    await update.message.reply_text("â Ð¦Ðµ Ð½Ð¾Ð²Ð¸Ð¹ Ð·Ð°Ð¿Ð¸Ñ ÑÐ¸ Ð´ÑÐ±Ð»Ñ Ð¿Ð¾Ð¿ÐµÑÐµÐ´Ð½ÑÐ¾Ð³Ð¾?")
+                    await update.message.reply_text("❓ Це новий запис чи дубль попереднього?")
                     return
                 result = write_single_action_to_sheet(pending_data, raw_text=text)
                 context.user_data.pop("pending_data", None)
                 await update.message.reply_text(result)
                 return
 
-            await update.message.reply_text("ÐÐ°Ð¿Ð¸ÑÐ¸ Â«ÑÐ°ÐºÂ», ÑÐºÑÐ¾ Ð¼ÐµÐ½Ñ Ð´Ð¾Ð´Ð°ÑÐ¸ ÑÐµÑÐµÐ´Ð½ÑÐ¾ÑÑÐ°ÑÐ¸ÑÑÐ¸ÑÐ½Ð¸Ð¹ Ð¿ÑÐ¾Ð±ÑÐ³, Ð°Ð±Ð¾ Ð¿ÑÐ¾ÑÑÐ¾ Ð½Ð°Ð´ÑÑÐ»Ð¸ ÑÐ¸ÑÑÐ¸ Ð¾Ð´Ð¾Ð¼ÐµÑÑÐ°.")
+            await update.message.reply_text("Напиши «так», якщо мені додати середньостатистичний пробіг, або просто надішли цифри одометра.")
             return
 
         car_id_for_summary = detect_month_summary_request(text)
@@ -1286,14 +1286,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(monthly_summary(car_id_for_summary))
             return
 
-        await update.message.reply_text("â³ ÐÐ±ÑÐ¾Ð±Ð»ÑÑ...")
+        await update.message.reply_text("⏳ Обробляю...")
 
         heuristic_actions = heuristic_multi_parse(text)
         if heuristic_actions:
             if actions_need_odometer(heuristic_actions):
                 context.user_data["pending_actions"] = heuristic_actions
                 context.user_data["waiting_odometer_choice_actions"] = True
-                await update.message.reply_text("â ÐÐµÐ¼Ð°Ñ Ð¾Ð´Ð¾Ð¼ÐµÑÑÐ°.\nÐÐµÐ½Ñ Ð´Ð¾Ð´Ð°ÑÐ¸ ÑÐµÑÐµÐ´Ð½ÑÐ¾ÑÑÐ°ÑÐ¸ÑÑÐ¸ÑÐ½Ð¸Ð¹ Ð¿ÑÐ¾Ð±ÑÐ³?\nÐÐ°Ð¿Ð¸ÑÐ¸ Â«ÑÐ°ÐºÂ» Ð°Ð±Ð¾ Ð¿ÑÐ¾ÑÑÐ¾ Ð½Ð°Ð´ÑÑÐ»Ð¸ ÑÐ¸ÑÑÐ¸ Ð¾Ð´Ð¾Ð¼ÐµÑÑÐ°.")
+                await update.message.reply_text("❓ Немає одометра.\nМені додати середньостатистичний пробіг?\nНапиши «так» або просто надішли цифри одометра.")
                 return
 
             spreadsheet = get_sheet()
@@ -1302,7 +1302,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if ws and detect_duplicate(ws, action, raw_text=text):
                     context.user_data["waiting_duplicate_confirm"] = True
                     context.user_data["pending_actions_after_duplicate"] = heuristic_actions
-                    await update.message.reply_text("â Ð¦Ðµ Ð½Ð¾Ð²Ð¸Ð¹ Ð·Ð°Ð¿Ð¸Ñ ÑÐ¸ Ð´ÑÐ±Ð»Ñ Ð¿Ð¾Ð¿ÐµÑÐµÐ´Ð½ÑÐ¾Ð³Ð¾?")
+                    await update.message.reply_text("❓ Це новий запис чи дубль попереднього?")
                     return
 
             result = write_actions_to_sheet(heuristic_actions, raw_text=text)
@@ -1313,12 +1313,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if pending_data:
             parsed = ask_ai(text, existing_data=pending_data)
             if "error" in parsed:
-                await update.message.reply_text(f"â AI ÑÐ¸Ð¼ÑÐ°ÑÐ¾Ð²Ð¾ Ð½ÐµÐ´Ð¾ÑÑÑÐ¿Ð½Ð¸Ð¹.\n\nÐÐµÑÐ°Ð»Ñ: {parsed['error']}")
+                await update.message.reply_text(f"❌ AI тимчасово недоступний.\n\nДеталь: {parsed['error']}")
                 return
         else:
             parsed = ask_ai(text)
             if "error" in parsed:
-                await update.message.reply_text(f"â AI ÑÐ¸Ð¼ÑÐ°ÑÐ¾Ð²Ð¾ Ð½ÐµÐ´Ð¾ÑÑÑÐ¿Ð½Ð¸Ð¹.\n\nÐÐµÑÐ°Ð»Ñ: {parsed['error']}")
+                await update.message.reply_text(f"❌ AI тимчасово недоступний.\n\nДеталь: {parsed['error']}")
                 return
 
         parsed["car_id"] = resolve_car_id(parsed.get("car_id"))
@@ -1329,16 +1329,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         missing_fields = parsed.get("missing_fields", [])
         if "car_id" in missing_fields:
             context.user_data["pending_data"] = parsed
-            await update.message.reply_text(f"â ÐÐµ Ð²Ð´Ð°Ð»Ð¾ÑÑ Ð²Ð¸Ð·Ð½Ð°ÑÐ¸ÑÐ¸ Ð¼Ð°ÑÐ¸Ð½Ñ.\nÐÐºÐ°Ð¶Ð¸ Ð½Ð¾Ð¼ÐµÑ Ð¼Ð°ÑÐ¸Ð½Ð¸ Ð· ÑÑÐ¾Ð³Ð¾ ÑÐ¿Ð¸ÑÐºÑ:\n{', '.join(KNOWN_CAR_IDS)}")
+            await update.message.reply_text(f"❓ Не вдалося визначити машину.\nВкажи номер машини з цього списку:\n{', '.join(KNOWN_CAR_IDS)}")
             return
 
         if missing_fields:
             context.user_data["pending_data"] = parsed
             if "odometer" in missing_fields:
                 context.user_data["waiting_odometer_choice"] = True
-                await update.message.reply_text("â ÐÐµÐ¼Ð°Ñ Ð¾Ð´Ð¾Ð¼ÐµÑÑÐ°.\nÐÐµÐ½Ñ Ð´Ð¾Ð´Ð°ÑÐ¸ ÑÐµÑÐµÐ´Ð½ÑÐ¾ÑÑÐ°ÑÐ¸ÑÑÐ¸ÑÐ½Ð¸Ð¹ Ð¿ÑÐ¾Ð±ÑÐ³?\nÐÐ°Ð¿Ð¸ÑÐ¸ Â«ÑÐ°ÐºÂ» Ð°Ð±Ð¾ Ð¿ÑÐ¾ÑÑÐ¾ Ð½Ð°Ð´ÑÑÐ»Ð¸ ÑÐ¸ÑÑÐ¸ Ð¾Ð´Ð¾Ð¼ÐµÑÑÐ°.")
+                await update.message.reply_text("❓ Немає одометра.\nМені додати середньостатистичний пробіг?\nНапиши «так» або просто надішли цифри одометра.")
                 return
-            await update.message.reply_text(f"â ÐÐµ Ð²Ð¸ÑÑÐ°ÑÐ°Ñ Ð´Ð°Ð½Ð¸Ñ.\n{ask_for_next_missing_field(missing_fields)}")
+            await update.message.reply_text(f"❓ Не вистачає даних.\n{ask_for_next_missing_field(missing_fields)}")
             return
 
         spreadsheet = get_sheet()
@@ -1347,13 +1347,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if odometer_is_anomalous(ws, int(parsed["odometer"]), parsed.get("date")):
                 context.user_data["waiting_odometer_anomaly_confirm"] = True
                 context.user_data["pending_actions_after_anomaly"] = [parsed]
-                await update.message.reply_text("â ï¸ ÐÑÐ¾Ð±ÑÐ³ Ð²Ð¸Ð³Ð»ÑÐ´Ð°Ñ Ð½ÐµÑÐ¸Ð¿Ð¾Ð²Ð¾ Ð²ÐµÐ»Ð¸ÐºÐ¸Ð¼. ÐÑÐ´ÑÐ²ÐµÑÐ´Ð¸ÑÐ¸?")
+                await update.message.reply_text("⚠️ Пробіг виглядає нетипово великим. Підтвердити?")
                 return
 
         if ws and detect_duplicate(ws, parsed, raw_text=text):
             context.user_data["waiting_duplicate_confirm"] = True
             context.user_data["pending_actions_after_duplicate"] = [parsed]
-            await update.message.reply_text("â Ð¦Ðµ Ð½Ð¾Ð²Ð¸Ð¹ Ð·Ð°Ð¿Ð¸Ñ ÑÐ¸ Ð´ÑÐ±Ð»Ñ Ð¿Ð¾Ð¿ÐµÑÐµÐ´Ð½ÑÐ¾Ð³Ð¾?")
+            await update.message.reply_text("❓ Це новий запис чи дубль попереднього?")
             return
 
         result = write_single_action_to_sheet(parsed, raw_text=text)
@@ -1362,27 +1362,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except json.JSONDecodeError as e:
         logger.error(f"JSON decode error: {e}")
-        await update.message.reply_text("â ÐÐ¾Ð¼Ð¸Ð»ÐºÐ° ÑÐ¾Ð·Ð±Ð¾ÑÑ Ð²ÑÐ´Ð¿Ð¾Ð²ÑÐ´Ñ Ð²ÑÐ´ AI. Ð¡Ð¿ÑÐ¾Ð±ÑÐ¹ ÑÐµ ÑÐ°Ð· ÑÐ½ÑÐ¸Ð¼Ð¸ ÑÐ»Ð¾Ð²Ð°Ð¼Ð¸.")
+        await update.message.reply_text("❌ Помилка розбору відповіді від AI. Спробуй ще раз іншими словами.")
     except Exception as e:
         logger.error(f"Error: {e}")
-        await update.message.reply_text(f"â ÐÐ¾Ð¼Ð¸Ð»ÐºÐ°: {str(e)}")
+        await update.message.reply_text(f"❌ Помилка: {str(e)}")
 
 
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await update.message.reply_text(
-        f"ð ÐÑÐ¸Ð²ÑÑ! Ð¯ Ð±Ð¾Ñ Ð°Ð²ÑÐ¾Ð¿Ð°ÑÐºÑ.\n\n"
-        f"Ð¢Ð²ÑÐ¹ Telegram ID: `{user_id}`\n\n"
-        f"Ð¯ Ð·Ð½Ð°Ñ ÑÐ°ÐºÑ Ð¼Ð°ÑÐ¸Ð½Ð¸:\n"
+        f"👋 Привіт! Я бот автопарку.\n\n"
+        f"Твій Telegram ID: `{user_id}`\n\n"
+        f"Я знаю такі машини:\n"
         f"{', '.join(KNOWN_CAR_IDS)}\n\n"
-        f"ÐÑÐ¸ÐºÐ»Ð°Ð´Ð¸:\n"
-        f"â¢ 8730 Ð¼ÑÑÑÑÑ\n"
-        f"â¢ Ð¼Ð°ÑÐ»Ð¾\n"
-        f"â¢ Ð³ÑÐ¼\n"
-        f"â¢ 8730 Ð¿ÑÐ¸ÑÐ¾Ð´ 3800, Ð´Ð¾Ð»Ð³ 200 Ð·Ð° Ð´ÑÐ¿, ÑÑÑÐ°Ñ 300 Ð·Ð° Ð¿Ð°ÑÐºÐ¾Ð²ÐºÑ\n"
-        f"â¢ Ð¨ÑÑÐ°Ñ 200 Ð·Ð° 8730\n"
-        f"â¢ Ð¢Ð 4553\n\n"
-        f"Ð¯ÐºÑÐ¾ Ð½Ðµ Ð²Ð¸ÑÑÐ°ÑÐ¸ÑÑ Ð¾Ð´Ð¾Ð¼ÐµÑÑÐ° â Ñ Ð°Ð±Ð¾ Ð¿ÐµÑÐµÐ¿Ð¸ÑÐ°Ñ, Ð°Ð±Ð¾ Ð¿ÑÐ´ÑÑÐ°Ð²Ð»Ñ ÑÐµÑÐµÐ´Ð½ÑÐ¾ÑÑÐ°ÑÐ¸ÑÑÐ¸ÑÐ½Ð¸Ð¹.",
+        f"Приклади:\n"
+        f"• 8730 місяць\n"
+        f"• масло\n"
+        f"• грм\n"
+        f"• 8730 приход 3800, долг 200 за дтп, штраф 300 за парковку\n"
+        f"• Штраф 200 за 8730\n"
+        f"• ТО 4553\n\n"
+        f"Якщо не вистачить одометра — я або перепитаю, або підставлю середньостатистичний.",
         parse_mode="Markdown",
     )
 
@@ -1399,7 +1399,7 @@ async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "pending_actions_after_anomaly",
     ]:
         context.user_data.pop(key, None)
-    await update.message.reply_text("â ÐÐ¾ÑÐ¾ÑÐ½Ðµ Ð²Ð²ÐµÐ´ÐµÐ½Ð½Ñ ÑÐºÐ°ÑÐ¾Ð²Ð°Ð½Ð¾.")
+    await update.message.reply_text("✅ Поточне введення скасовано.")
 
 
 def main():
@@ -1409,7 +1409,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("Bot started!")
 
-    # Ð¢ÑÐµÐ±ÑÐµÑ job-queue extras/apscheduler Ð² Ð¾ÐºÑÑÐ¶ÐµÐ½Ð¸Ð¸.
+    # Требует job-queue extras/apscheduler в окружении.
     if getattr(app, "job_queue", None) is not None:
         app.job_queue.run_daily(check_notifications, time=dt_time(hour=9, minute=15, tzinfo=KYIV_TZ), name="check_notifications_morning")
         app.job_queue.run_daily(check_notifications, time=dt_time(hour=16, minute=0, tzinfo=KYIV_TZ), name="check_notifications_evening")

@@ -75,9 +75,6 @@ TO_BUNDLE = [
 
 SKIP_GRM = {"9245", "5308", "4715", "8204", "0736"}
 
-REPORT_CACHE = {"fleet_snapshot": None, "fleet_snapshot_ts": None, "oil_report": None, "oil_report_ts": None, "grm_report": None, "grm_report_ts": None}
-REPORT_CACHE_TTL_SECONDS = 180
-
 
 def extract_digits(value: str) -> str:
     return "".join(re.findall(r"\d+", str(value or "")))
@@ -301,6 +298,58 @@ def find_last(ws, keywords):
 
 
 
+SERVICE_CACHE_TTL = 180
+_service_snapshot_cache = {"ts": 0.0, "data": None}
+
+def get_service_snapshot(force: bool = False):
+    now = time.time()
+    if not force and _service_snapshot_cache["data"] is not None and now - _service_snapshot_cache["ts"] < SERVICE_CACHE_TTL:
+        return _service_snapshot_cache["data"]
+
+    spreadsheet = get_sheet()
+    snapshot = {}
+    for car in KNOWN_CAR_IDS:
+        ws = get_matching_worksheet(spreadsheet, car)
+        if not ws:
+            continue
+        rows = ws.get_all_values()
+        snapshot[car] = {"title": ws.title, "rows": rows}
+
+    _service_snapshot_cache["ts"] = now
+    _service_snapshot_cache["data"] = snapshot
+    return snapshot
+
+
+def get_current_odometer_from_rows(rows):
+    last_f = 0
+    last_l = 0
+    for row in rows[7:]:
+        if len(row) > 5:
+            v = parse_num(row[5] if len(row) > 5 else None)
+            if v:
+                last_f = v
+        if len(row) > 11:
+            v = parse_num(row[11] if len(row) > 11 else None)
+            if v:
+                last_l = v
+    return max(last_f, last_l)
+
+
+def find_last_service_in_rows(rows, service_type: str):
+    if service_type == "oil":
+        keywords = ["масло", "замена масла", "масло в двигатель", "то"]
+    else:
+        keywords = ["грм", "комплект грм", "замена грм"]
+
+    for r in reversed(rows[7:]):
+        if len(r) > 6:
+            desc = str(r[6]).lower().strip()
+            odo = parse_num(r[5] if len(r) > 5 else None)
+            if odo and any(k in desc for k in keywords):
+                return (r[4] if len(r) > 4 else "", odo)
+    return None, None
+
+
 def format_km_value(value: int | float) -> str:
     try:
         n = int(round(float(value)))
@@ -357,88 +406,66 @@ def find_last_service(ws, service_type: str):
                 return (r[4] if len(r) > 4 else "", odo)
     return None, None
 
-def build_oil_report(force=False):
-    if not force and _cache_fresh(REPORT_CACHE.get("oil_report_ts")) and REPORT_CACHE.get("oil_report") is not None:
-        return REPORT_CACHE["oil_report"]
-
-    snapshot = load_fleet_snapshot(force=force)
+def build_oil_report():
+    s = get_sheet()
     out = []
     for car in KNOWN_CAR_IDS:
-        item = snapshot.get(car)
-        if not item:
+        ws = get_matching_worksheet(s, car)
+        if not ws:
             continue
-        rows = item["rows"]
-        service_date, odo = find_last_service_in_rows(rows, "oil")
+        service_date, odo = find_last_service(ws, "oil")
         if not odo:
             continue
-        cur = get_current_odometer_from_rows(rows)
+        cur = get_current_odometer(ws)
         remaining = 10000 - (cur - odo)
         icon = oil_status_icon(remaining)
         out.append(f"{icon} {car} | {service_date} | {odo} | {format_km_value(remaining)} км")
-
-    report = """Стан масла:
-".join(out) if out else "Немає даних по заміні масла."
-    REPORT_CACHE["oil_report"] = report
-    REPORT_CACHE["oil_report_ts"] = time.time()
-    return report
+    return "\n".join(out) if out else "Немає даних по заміні масла."
 
 
-def build_grm_report(force=False):
-    if not force and _cache_fresh(REPORT_CACHE.get("grm_report_ts")) and REPORT_CACHE.get("grm_report") is not None:
-        return REPORT_CACHE["grm_report"]
-
-    snapshot = load_fleet_snapshot(force=force)
+def build_grm_report():
+    s = get_sheet()
     out = []
     for car in KNOWN_CAR_IDS:
         if car in SKIP_GRM:
             continue
-        item = snapshot.get(car)
-        if not item:
+        ws = get_matching_worksheet(s, car)
+        if not ws:
             continue
-        rows = item["rows"]
-        service_date, odo = find_last_service_in_rows(rows, "grm")
+        service_date, odo = find_last_service(ws, "grm")
         if not odo:
             continue
-        cur = get_current_odometer_from_rows(rows)
+        cur = get_current_odometer(ws)
         remaining = 50000 - (cur - odo)
         icon = grm_status_icon(remaining)
         out.append(f"{icon} {car} | {service_date} | {odo} | {format_km_value(remaining)} км")
-
-    report = "
-".join(out) if out else "Немає даних по заміні ГРМ."
-    REPORT_CACHE["grm_report"] = report
-    REPORT_CACHE["grm_report_ts"] = time.time()
-    return report
+    return "\n".join(out) if out else "Немає даних по заміні ГРМ."
 
 
 async def check_notifications(context: ContextTypes.DEFAULT_TYPE):
-    snapshot = load_fleet_snapshot(force=True)
+    s = get_sheet()
     msgs = []
     for car in KNOWN_CAR_IDS:
-        item = snapshot.get(car)
-        if not item:
+        ws = get_matching_worksheet(s, car)
+        if not ws:
             continue
-        rows = item["rows"]
-        cur = get_current_odometer_from_rows(rows)
+        cur = get_current_odometer(ws)
 
-        _, odo = find_last_service_in_rows(rows, "oil")
+        _, odo = find_last_service(ws, "oil")
         if odo:
             remaining = 10000 - (cur - odo)
             if remaining <= 1000:
                 msgs.append(f"🚗 {car} — масло через {format_km_value(remaining)} км")
 
         if car not in SKIP_GRM:
-            _, odo = find_last_service_in_rows(rows, "grm")
+            _, odo = find_last_service(ws, "grm")
             if odo:
                 remaining = 50000 - (cur - odo)
                 if remaining <= 1000:
                     msgs.append(f"🚗 {car} — ГРМ через {format_km_value(remaining)} км")
 
     if msgs:
-        text = "⚠️ Нагадування:
-
-" + "
-".join(msgs)
+        text = "⚠️ Нагадування:\n\n" + "\n".join(msgs)
         for uid in ALLOWED_USERS:
             await context.bot.send_message(chat_id=uid, text=text)
 

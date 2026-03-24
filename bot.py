@@ -344,24 +344,18 @@ def is_grm_report_request(text: str) -> bool:
 
 
 
-def find_last_service_in_rows(rows, service_type: str):
+def normalize_service_text(s: str) -> str:
+    s = str(s or "").lower().strip()
+    s = s.replace("ё", "е")
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def build_expense_blocks(rows):
     """
-    Ищем последнюю замену как БЛОК расходов, а не одиночную строку.
-    Блок = подряд идущие строки в расходах с одинаковыми датой (E) и одометром (F).
-    Это нужно для пакетных ТО, где масло/фильтры/работы лежат в нескольких строках подряд.
+    Собираем блоки расходов по одинаковым дате (E) и одометру (F).
+    Это покрывает пакетные записи ТО/ГРМ на несколько строк подряд.
     """
-    def norm(s):
-        return str(s or "").strip().lower()
-
-    def row_date_odo(row):
-        row_date = row[4] if len(row) > 4 else ""
-        row_odo = parse_num(row[5] if len(row) > 5 else None)
-        return str(row_date).strip(), row_odo
-
-    def row_desc(row):
-        return norm(row[6] if len(row) > 6 else "")
-
-    # Собираем блоки расходов по (дата, одометр)
     blocks = []
     current = None
 
@@ -369,10 +363,10 @@ def find_last_service_in_rows(rows, service_type: str):
         if len(row) <= 6:
             continue
 
-        row_date, row_odo = row_date_odo(row)
-        desc = row_desc(row)
+        row_date = str(row[4]).strip() if len(row) > 4 else ""
+        row_odo = parse_num(row[5] if len(row) > 5 else None)
+        desc = normalize_service_text(row[6] if len(row) > 6 else "")
 
-        # интересуют только строки расходов, где есть описание
         if not row_date or row_odo is None or not desc:
             continue
 
@@ -392,61 +386,72 @@ def find_last_service_in_rows(rows, service_type: str):
     if current:
         blocks.append(current)
 
+    return blocks
+
+
+def service_block_score(descs, service_type: str) -> int:
+    text = " | ".join(descs)
+    score = 0
+
     if service_type == "oil":
-        # Масло считаем по реальным ориентирам замены:
-        # - масло в двигатель
-        # - масляный фильтр
-        # - замена масла
-        # - моторное масло
-        def is_oil_block(descs):
-            text = " | ".join(descs)
-            if "масло в двигатель" in text:
-                return True
-            if "замена масла" in text:
-                return True
-            if "моторное масло" in text:
-                return True
-            # "масляный фильтр" учитываем как точку замены масла,
-            # но только если в блоке есть хотя бы еще один масляный ориентир
-            if "масляный фильтр" in text and any(
-                k in text for k in ["масло", "фильтр"]
-            ):
-                return True
-            return False
+        # Сильные признаки замены масла
+        if "масло в двигатель" in text:
+            score += 10
+        if "моторное масло" in text:
+            score += 9
+        if "замена масла" in text:
+            score += 8
+        if "масляный фильтр" in text:
+            score += 6
 
-        for block in reversed(blocks):
-            if is_oil_block(block["descs"]):
-                return block["date"], block["odo"]
-        return None, None
+        # Усиливаем типичный пакет ТО, но не используем само "ТО" как единственный ориентир
+        if "масло в двигатель" in text and "масляный фильтр" in text:
+            score += 5
+        if "масло в двигатель" in text and ("работы за то" in text or "газовые фильтра" in text or "воздушный фильтр" in text):
+            score += 2
 
-    if service_type == "grm":
-        def is_grm_block(descs):
-            text = " | ".join(descs)
-            return any(k in text for k in [
-                "комплект грм",
-                "замена грм",
-                "замана грм",
-                "грм",
-            ])
+        # Ложные срабатывания ослабляем
+        if "масло кпп" in text or "масло в коробку" in text or "масло гур" in text or "масло редуктора" in text:
+            score -= 6
 
-        for block in reversed(blocks):
-            if is_grm_block(block["descs"]):
-                return block["date"], block["odo"]
-        return None, None
+    elif service_type == "grm":
+        if "комплект грм" in text:
+            score += 12
+        if "замена грм" in text or "замана грм" in text:
+            score += 10
+        # Просто "грм" — более слабый сигнал
+        if re.search(r"(^|[^а-я])грм([^а-я]|$)", text):
+            score += 6
+        if "ролик грм" in text or "ремень грм" in text or "помпа" in text:
+            score += 3
+
+    return score
+
+
+def find_last_service_in_rows(rows, service_type: str):
+    """
+    Более гибкий поиск последней замены масла/ГРМ.
+    Ищет по блокам расходов с одинаковыми датой и одометром,
+    затем выбирает ПОСЛЕДНИЙ валидный блок с достаточным score.
+    """
+    blocks = build_expense_blocks(rows)
+
+    min_score = 8 if service_type == "oil" else 9
+
+    for block in reversed(blocks):
+        score = service_block_score(block["descs"], service_type)
+        if score >= min_score:
+            return block["date"], block["odo"]
+
+    # Фолбэк: если строгих блоков не нашли, берем последний блок со слабым, но явным сигналом
+    fallback_min = 5 if service_type == "oil" else 6
+    for block in reversed(blocks):
+        score = service_block_score(block["descs"], service_type)
+        if score >= fallback_min:
+            return block["date"], block["odo"]
 
     return None, None
 
-
-    keywords = ["комплект грм", "замена грм", "замана грм", "грм"]
-    for idx in range(len(rows) - 1, 7, -1):
-        r = rows[idx]
-        if len(r) <= 6:
-            continue
-        desc = str(r[6]).lower().strip()
-        row_date, row_odo = row_date_odo(idx)
-        if row_odo and any(k in desc for k in keywords):
-            return row_date, row_odo
-    return None, None
 
 def get_current_odometer_from_rows(rows):
     # Берем последнее заполненное значение одометра в расходах (F)

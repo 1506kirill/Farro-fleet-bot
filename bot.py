@@ -295,6 +295,64 @@ def find_last(ws, keywords):
 
 # ================= TO/GRM REPORTS =================
 
+
+
+def format_km_value(value: int | float) -> str:
+    try:
+        n = int(round(float(value)))
+    except Exception:
+        return str(value)
+    s = f"{abs(n):,}".replace(",", ".")
+    return f"-{s}" if n < 0 else s
+
+
+def oil_status_icon(remaining: int | float) -> str:
+    r = float(remaining)
+    if r <= 2500:
+        return "🟢"
+    if r <= 5000:
+        return "🟡"
+    if r <= 7500:
+        return "🟠"
+    return "🔴"
+
+
+def grm_status_icon(remaining: int | float) -> str:
+    r = float(remaining)
+    if r <= 12500:
+        return "🟢"
+    if r <= 25000:
+        return "🟡"
+    if r <= 37500:
+        return "🟠"
+    return "🔴"
+
+
+def is_oil_report_request(text: str) -> bool:
+    t = re.sub(r"\s+", " ", str(text or "").strip().lower())
+    return t in {"масло", "замена масла", "заміна масла", "то", "плановое то", "планове то"}
+
+
+def is_grm_report_request(text: str) -> bool:
+    t = re.sub(r"\s+", " ", str(text or "").strip().lower())
+    return t in {"грм", "замена грм", "заміна грм", "комплект грм"}
+
+
+def find_last_service(ws, service_type: str):
+    rows = ws.get_all_values()
+    if service_type == "oil":
+        keywords = ["масло", "замена масла", "масло в двигатель", "то"]
+    else:
+        keywords = ["грм", "комплект грм", "замена грм"]
+
+    for r in reversed(rows[7:]):
+        if len(r) > 6:
+            desc = str(r[6]).lower().strip()
+            odo = parse_num(r[5] if len(r) > 5 else None)
+            if odo and any(k in desc for k in keywords):
+                return (r[4] if len(r) > 4 else "", odo)
+    return None, None
+
 def build_oil_report():
     s = get_sheet()
     out = []

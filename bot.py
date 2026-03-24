@@ -317,9 +317,9 @@ def oil_status_icon(remaining: int | float) -> str:
     r = float(remaining)
     if r <= 1000:
         return "🔴"
-    if r <= 4000:
+    if r <= 3333:
         return "🟠"
-    if r <= 7000:
+    if r <= 6666:
         return "🟡"
     return "🟢"
 
@@ -327,9 +327,9 @@ def grm_status_icon(remaining: int | float) -> str:
     r = float(remaining)
     if r <= 1000:
         return "🔴"
-    if r <= 17000:
+    if r <= 16666:
         return "🟠"
-    if r <= 34000:
+    if r <= 33333:
         return "🟡"
     return "🟢"
 
@@ -343,48 +343,99 @@ def is_grm_report_request(text: str) -> bool:
     return t in {"грм", "замена грм", "заміна грм", "комплект грм"}
 
 
+
 def find_last_service_in_rows(rows, service_type: str):
-    def row_date_odo(idx):
-        r = rows[idx]
-        row_date = r[4] if len(r) > 4 else ""
-        row_odo = parse_num(r[5] if len(r) > 5 else None)
-        return row_date, row_odo
+    """
+    Ищем последнюю замену как БЛОК расходов, а не одиночную строку.
+    Блок = подряд идущие строки в расходах с одинаковыми датой (E) и одометром (F).
+    Это нужно для пакетных ТО, где масло/фильтры/работы лежат в нескольких строках подряд.
+    """
+    def norm(s):
+        return str(s or "").strip().lower()
+
+    def row_date_odo(row):
+        row_date = row[4] if len(row) > 4 else ""
+        row_odo = parse_num(row[5] if len(row) > 5 else None)
+        return str(row_date).strip(), row_odo
+
+    def row_desc(row):
+        return norm(row[6] if len(row) > 6 else "")
+
+    # Собираем блоки расходов по (дата, одометр)
+    blocks = []
+    current = None
+
+    for row in rows[7:]:
+        if len(row) <= 6:
+            continue
+
+        row_date, row_odo = row_date_odo(row)
+        desc = row_desc(row)
+
+        # интересуют только строки расходов, где есть описание
+        if not row_date or row_odo is None or not desc:
+            continue
+
+        key = (row_date, row_odo)
+        if current and current["key"] == key:
+            current["descs"].append(desc)
+        else:
+            if current:
+                blocks.append(current)
+            current = {
+                "key": key,
+                "date": row_date,
+                "odo": row_odo,
+                "descs": [desc],
+            }
+
+    if current:
+        blocks.append(current)
 
     if service_type == "oil":
-        strict_keywords = [
-            "масло в двигатель",
-            "замена масла",
-            "моторное масло",
-        ]
-        filter_keyword = "масляный фильтр"
+        # Масло считаем по реальным ориентирам замены:
+        # - масло в двигатель
+        # - масляный фильтр
+        # - замена масла
+        # - моторное масло
+        def is_oil_block(descs):
+            text = " | ".join(descs)
+            if "масло в двигатель" in text:
+                return True
+            if "замена масла" in text:
+                return True
+            if "моторное масло" in text:
+                return True
+            # "масляный фильтр" учитываем как точку замены масла,
+            # но только если в блоке есть хотя бы еще один масляный ориентир
+            if "масляный фильтр" in text and any(
+                k in text for k in ["масло", "фильтр"]
+            ):
+                return True
+            return False
 
-        for idx in range(len(rows) - 1, 7, -1):
-            r = rows[idx]
-            if len(r) <= 6:
-                continue
-            desc = str(r[6]).lower().strip()
-            row_date, row_odo = row_date_odo(idx)
-            if not row_odo:
-                continue
-
-            if any(k in desc for k in strict_keywords):
-                return row_date, row_odo
-
-            if filter_keyword in desc:
-                # засчитываем масляный фильтр как точку замены масла только если
-                # рядом в том же пакете есть строка "масло в двигатель" с теми же датой и одометром
-                for j in range(max(7, idx - 8), min(len(rows), idx + 9)):
-                    if j == idx:
-                        continue
-                    rr = rows[j]
-                    if len(rr) <= 6:
-                        continue
-                    d2 = rr[4] if len(rr) > 4 else ""
-                    o2 = parse_num(rr[5] if len(rr) > 5 else None)
-                    desc2 = str(rr[6]).lower().strip()
-                    if d2 == row_date and o2 == row_odo and "масло в двигатель" in desc2:
-                        return row_date, row_odo
+        for block in reversed(blocks):
+            if is_oil_block(block["descs"]):
+                return block["date"], block["odo"]
         return None, None
+
+    if service_type == "grm":
+        def is_grm_block(descs):
+            text = " | ".join(descs)
+            return any(k in text for k in [
+                "комплект грм",
+                "замена грм",
+                "замана грм",
+                "грм",
+            ])
+
+        for block in reversed(blocks):
+            if is_grm_block(block["descs"]):
+                return block["date"], block["odo"]
+        return None, None
+
+    return None, None
+
 
     keywords = ["комплект грм", "замена грм", "замана грм", "грм"]
     for idx in range(len(rows) - 1, 7, -1):

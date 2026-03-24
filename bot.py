@@ -2,7 +2,7 @@ import os
 import re
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, date
 from statistics import median
 
 import requests
@@ -116,6 +116,17 @@ def normalize_date_short(date_str: str | None) -> str:
     return datetime.now().strftime("%d.%m.%y")
 
 
+def parse_short_date(date_str: str | None) -> date | None:
+    if not date_str:
+        return None
+    for fmt in ("%d.%m.%Y", "%d.%m.%y", "%d-%m-%Y", "%d-%m-%y"):
+        try:
+            return datetime.strptime(str(date_str).strip(), fmt).date()
+        except ValueError:
+            pass
+    return None
+
+
 def clean_json_text(text: str) -> str:
     if not text:
         return ""
@@ -172,7 +183,7 @@ def is_to_phrase(text: str) -> bool:
 def detect_liability_type(text: str) -> str | None:
     t = str(text or "").lower().strip()
 
-    positive_markers = [
+    plus_markers = [
         "взял",
         "принял",
         "погасил",
@@ -182,7 +193,7 @@ def detect_liability_type(text: str) -> str | None:
         " дала ",
         "дали ",
     ]
-    negative_markers = [
+    minus_markers = [
         "штраф",
         "долг",
         "должен",
@@ -191,11 +202,310 @@ def detect_liability_type(text: str) -> str | None:
         "дожен",
     ]
 
-    if any(marker in t for marker in positive_markers):
+    if any(marker in t for marker in plus_markers):
         return "liability_plus"
 
-    if any(marker in t for marker in negative_markers):
+    if any(marker in t for marker in minus_markers):
         return "liability_minus"
+
+    return None
+
+
+def blue_text_format():
+    return CellFormat(
+        textFormat=TextFormat(
+            foregroundColor=Color(0, 0, 1)
+        )
+    )
+
+
+def yellow_fill_format():
+    return CellFormat(
+        backgroundColor=Color(1, 0.96, 0.75)
+    )
+
+
+def apply_blue_text(ws, cell_range: str):
+    format_cell_range(ws, cell_range, blue_text_format())
+
+
+def mark_cell_yellow(ws, cell_range: str):
+    format_cell_range(ws, cell_range, yellow_fill_format())
+
+
+def parse_numeric_text(value) -> int | None:
+    if value is None:
+        return None
+    s = str(value).strip()
+    digits = re.sub(r"[^\d]", "", s)
+    if not digits:
+        return None
+    try:
+        return int(digits)
+    except ValueError:
+        return None
+
+
+def get_matching_worksheet(spreadsheet, car_id: str):
+    full_plate = full_plate_from_short(car_id)
+    for ws in spreadsheet.worksheets():
+        title = str(ws.title)
+        if car_id in title or full_plate in title:
+            return ws
+    return None
+
+
+def get_last_used_row_for_block(ws, start_col: int, end_col: int, start_row: int = 8) -> int:
+    all_vals = ws.get_all_values()
+    last_used = start_row - 1
+
+    for row_idx in range(start_row, len(all_vals) + 1):
+        row = all_vals[row_idx - 1]
+        block = row[start_col - 1:end_col]
+        if any(str(cell).strip() for cell in block):
+            last_used = row_idx
+
+    return last_used
+
+
+def get_next_expense_row(ws) -> int:
+    # Только ниже последнего расхода
+    return get_last_used_row_for_block(ws, 5, 9, 8) + 1
+
+
+def get_next_right_block_row(ws) -> int:
+    # Правая часть таблицы ведется строго вниз по порядку
+    last_income_row = get_last_used_row_for_block(ws, 11, 15, 8)
+    last_liability_row = get_last_used_row_for_block(ws, 16, 17, 8)
+    return max(last_income_row, last_liability_row) + 1
+
+
+def get_previous_income_odometer(ws) -> int | None:
+    all_vals = ws.get_all_values()
+    odometers = []
+
+    for row in all_vals[7:]:
+        if len(row) > 11:
+            value = parse_numeric_text(row[11])
+            if value:
+                odometers.append(value)
+
+    return odometers[-1] if odometers else None
+
+
+def get_usd_black_rate_dnipro() -> float | None:
+    headers = {"User-Agent": "Mozilla/5.0"}
+    resp = requests.get(MINFIN_URL, headers=headers, timeout=15)
+    resp.raise_for_status()
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    text = soup.get_text(" ", strip=True)
+
+    patterns = [
+        r"Средняя покупка\s*([0-9]+[.,][0-9]+)",
+        r"Середня купівля\s*([0-9]+[.,][0-9]+)",
+        r"Покупка\s*([0-9]+[.,][0-9]+)",
+    ]
+
+    for pattern in patterns:
+        m = re.search(pattern, text, re.IGNORECASE)
+        if m:
+            return float(m.group(1).replace(",", "."))
+
+    matches = re.findall(r"\b([0-9]{2}[.,][0-9]{2})\b", text)
+    for val in matches:
+        num = float(val.replace(",", "."))
+        if 35 <= num <= 50:
+            return num
+
+    return None
+
+
+def get_last_8_weekly_points(ws):
+    all_vals = ws.get_all_values()
+    points = []
+
+    for row in all_vals[7:]:
+        if len(row) > 11:
+            d = parse_short_date(row[10] if len(row) > 10 else None)  # K
+            odo = parse_numeric_text(row[11] if len(row) > 11 else None)  # L
+            if d and odo is not None:
+                points.append((d, odo))
+
+    return points[-8:]
+
+
+def estimate_odometer_for_car(car_id: str, target_date_str: str | None = None) -> int | None:
+    spreadsheet = get_sheet()
+    ws = get_matching_worksheet(spreadsheet, car_id)
+    if not ws:
+        return None
+
+    points = get_last_8_weekly_points(ws)
+    if not points:
+        return None
+
+    target_date = parse_short_date(target_date_str) or datetime.now().date()
+    last_date, last_odo = points[-1]
+
+    if target_date <= last_date:
+        return last_odo
+
+    daily_rates = []
+    for i in range(1, len(points)):
+        prev_date, prev_odo = points[i - 1]
+        curr_date, curr_odo = points[i]
+        delta_days = (curr_date - prev_date).days
+        delta_km = curr_odo - prev_odo
+
+        if delta_days > 0 and 0 <= delta_km <= 7000:
+            rate = delta_km / delta_days
+            if 0 <= rate <= 300:
+                daily_rates.append(rate)
+
+    if daily_rates:
+        median_daily_rate = median(daily_rates)
+        future_days = (target_date - last_date).days
+        return int(round(last_odo + median_daily_rate * future_days))
+
+    if len(points) >= 2:
+        prev_date, prev_odo = points[-2]
+        delta_days = max((last_date - prev_date).days, 1)
+        delta_km = max(last_odo - prev_odo, 0)
+        fallback_rate = delta_km / delta_days
+        future_days = (target_date - last_date).days
+        return int(round(last_odo + fallback_rate * future_days))
+
+    return last_odo
+
+
+def build_known_liability_desc(raw_text: str, op_type: str, ai_description: str | None) -> str:
+    t = str(raw_text or "").lower()
+    desc = str(ai_description or "").strip()
+
+    if "дтп" in t:
+        base = "за ДТП"
+    elif "телевиз" in t:
+        base = "за телевизор"
+    elif "парков" in t:
+        base = "за парковку"
+    elif "превыш" in t:
+        base = "за превышение"
+    elif "штраф" in t and op_type == "liability_plus":
+        base = "за штраф"
+    elif desc:
+        if desc.lower().startswith("за "):
+            base = desc
+        else:
+            base = f"за {desc}"
+    else:
+        base = ""
+
+    if op_type == "liability_minus":
+        if "штраф" in t:
+            return f"штраф {base}".strip()
+        return f"долг {base}".strip()
+
+    return f"погашение долга {base}".strip()
+
+
+def find_all_numbers(text: str) -> list[int]:
+    return [int(x) for x in re.findall(r"\d+", str(text or ""))]
+
+
+def heuristic_multi_parse(text: str):
+    """
+    Возвращает список действий или None.
+    Используется для типовых фраз с несколькими числами.
+    """
+    t = str(text or "").strip()
+    tl = t.lower()
+
+    car_ids_in_text = []
+    for car_id in KNOWN_CAR_IDS:
+        if re.search(rf"(?<!\d){re.escape(car_id)}(?!\d)", t):
+            car_ids_in_text.append(car_id)
+
+    car_id = car_ids_in_text[0] if car_ids_in_text else None
+    if not car_id:
+        return None
+
+    all_numbers = find_all_numbers(t)
+    amounts = [n for n in all_numbers if str(n) != str(car_id) and str(n) not in KNOWN_CAR_IDS]
+
+    if is_to_phrase(t):
+        return [{
+            "type": "expense",
+            "car_id": car_id,
+            "date": normalize_date_short(None),
+            "amount": 0,
+            "description": "ТО",
+            "odometer": None,
+            "notes": None,
+            "missing_fields": [],
+        }]
+
+    liability_type = detect_liability_type(t)
+
+    # Пример: "Штраф 200 за 8730", "1875 Разбил телевизор долг 1200"
+    if liability_type == "liability_minus" and amounts:
+        amount = amounts[0]
+        return [{
+            "type": "liability_minus",
+            "car_id": car_id,
+            "date": normalize_date_short(None),
+            "amount": amount,
+            "description": build_known_liability_desc(t, "liability_minus", None),
+            "odometer": None,
+            "notes": None,
+            "missing_fields": [],
+        }]
+
+    # Пример: "Взял 3800 за 9245"
+    if liability_type == "liability_plus" and len(amounts) == 1:
+        amount = amounts[0]
+        return [{
+            "type": "income",
+            "car_id": car_id,
+            "date": normalize_date_short(None),
+            "amount": amount,
+            "description": "",
+            "odometer": None,
+            "notes": None,
+            "missing_fields": [],
+        }]
+
+    # Пример: "Взял 3800 за 7121 и взял 200 за дтп"
+    # Большая сумма = приход, меньшая = погашение/долг
+    if liability_type == "liability_plus" and len(amounts) >= 2:
+        sorted_amounts = sorted(amounts, reverse=True)
+        main_amount = sorted_amounts[0]
+        extra_amounts = sorted_amounts[1:]
+
+        actions = [{
+            "type": "income",
+            "car_id": car_id,
+            "date": normalize_date_short(None),
+            "amount": main_amount,
+            "description": "",
+            "odometer": None,
+            "notes": None,
+            "missing_fields": [],
+        }]
+
+        for extra in extra_amounts:
+            actions.append({
+                "type": "liability_plus",
+                "car_id": car_id,
+                "date": normalize_date_short(None),
+                "amount": extra,
+                "description": build_known_liability_desc(t, "liability_plus", None),
+                "odometer": None,
+                "notes": None,
+                "missing_fields": [],
+            })
+
+        return actions
 
     return None
 
@@ -240,9 +550,8 @@ def build_prompt(message: str, existing_data: dict | None = None) -> str:
 16. Если пользователь пишет "взял", "принял", "погасил", "дал" в контексте долга — type верни как "liability_plus".
 17. Для liability_minus и liability_plus odometer не нужен.
 18. Для liability_minus и liability_plus description должна быть только текстом причины БЕЗ номера машины и БЕЗ суммы.
-19. Для штрафа description примеры: "штраф за парковку", "штраф за превышение".
-20. Для долга description примеры: "долг за телевизор", "долг за ДТП".
-21. Для погашения description примеры: "погашение долга за телевизор", "погашение долга".
+19. Если в сообщении есть одна машина и две суммы при словах "взял/принял/погасил/дал", то большая сумма — это income, меньшая — liability_plus.
+20. Для income description может быть пустым.
 
 Распознавай тип операции по словам:
 - income: приход, доход, пришло, заработок, оплата, выручка
@@ -411,182 +720,37 @@ def ask_for_next_missing_field(missing_fields: list[str]) -> str:
     return mapping.get(field, "Уточни, будь ласка, відсутні дані.")
 
 
-def get_usd_black_rate_dnipro() -> float | None:
-    headers = {"User-Agent": "Mozilla/5.0"}
-    resp = requests.get(MINFIN_URL, headers=headers, timeout=15)
-    resp.raise_for_status()
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-    text = soup.get_text(" ", strip=True)
-
-    patterns = [
-        r"Средняя покупка\s*([0-9]+[.,][0-9]+)",
-        r"Середня купівля\s*([0-9]+[.,][0-9]+)",
-        r"Покупка\s*([0-9]+[.,][0-9]+)",
-    ]
-
-    for pattern in patterns:
-        m = re.search(pattern, text, re.IGNORECASE)
-        if m:
-            return float(m.group(1).replace(",", "."))
-
-    matches = re.findall(r"\b([0-9]{2}[.,][0-9]{2})\b", text)
-    for val in matches:
-        num = float(val.replace(",", "."))
-        if 35 <= num <= 50:
-            return num
-
-    return None
-
-
-def parse_numeric_text(value) -> int | None:
-    if value is None:
-        return None
-    s = str(value).strip()
-    digits = re.sub(r"[^\d]", "", s)
-    if not digits:
-        return None
-    try:
-        return int(digits)
-    except ValueError:
-        return None
-
-
-def get_matching_worksheet(spreadsheet, car_id: str):
-    full_plate = full_plate_from_short(car_id)
-    for ws in spreadsheet.worksheets():
-        title = str(ws.title)
-        if car_id in title or full_plate in title:
-            return ws
-    return None
-
-
-def get_last_odometer_stats(ws) -> tuple[int | None, int | None]:
-    all_vals = ws.get_all_values()
-    odometers = []
-
-    for row in all_vals[7:]:
-        expense_odo = parse_numeric_text(row[5]) if len(row) > 5 else None
-        income_odo = parse_numeric_text(row[11]) if len(row) > 11 else None
-
-        if expense_odo:
-            odometers.append(expense_odo)
-        if income_odo:
-            odometers.append(income_odo)
-
-    if not odometers:
-        return None, None
-
-    last_odo = odometers[-1]
-    deltas = []
-
-    for i in range(1, len(odometers)):
-        delta = odometers[i] - odometers[i - 1]
-        if 0 < delta <= 5000:
-            deltas.append(delta)
-
-    if deltas:
-        recent = deltas[-5:]
-        typical_delta = int(round(median(recent)))
-        return last_odo, last_odo + typical_delta
-
-    return last_odo, last_odo
-
-
-def estimate_odometer_for_car(car_id: str) -> int | None:
-    spreadsheet = get_sheet()
-    ws = get_matching_worksheet(spreadsheet, car_id)
-    if not ws:
-        return None
-    _, estimated = get_last_odometer_stats(ws)
-    return estimated
-
-
-def blue_text_format():
-    return CellFormat(
-        textFormat=TextFormat(
-            foregroundColor=Color(0, 0, 1)
-        )
-    )
-
-
-def yellow_fill_format():
-    return CellFormat(
-        backgroundColor=Color(1, 0.96, 0.75)
-    )
-
-
-def apply_blue_text(ws, cell_range: str):
-    format_cell_range(ws, cell_range, blue_text_format())
-
-
-def mark_cell_yellow(ws, cell_range: str):
-    format_cell_range(ws, cell_range, yellow_fill_format())
-
-
-def get_last_used_row_for_block(ws, start_col: int, end_col: int, start_row: int = 8) -> int:
-    all_vals = ws.get_all_values()
-    last_used = start_row - 1
-
-    for row_idx in range(start_row, len(all_vals) + 1):
-        row = all_vals[row_idx - 1]
-        block = row[start_col - 1:end_col]
-        if any(str(cell).strip() for cell in block):
-            last_used = row_idx
-
-    return last_used
-
-
-def get_next_expense_row(ws) -> int:
-    return get_last_used_row_for_block(ws, 5, 10, 8) + 1
-
-
-def get_next_income_row(ws) -> int:
-    return get_last_used_row_for_block(ws, 11, 17, 8) + 1
-
-
-def get_previous_income_odometer(ws) -> int | None:
-    all_vals = ws.get_all_values()
-    odometers = []
-
-    for row in all_vals[7:]:
-        if len(row) > 11:
-            value = parse_numeric_text(row[11])
-            if value:
-                odometers.append(value)
-
-    return odometers[-1] if odometers else None
-
-
-def build_liability_description(op_type: str, raw_text: str, ai_description: str) -> str:
-    desc = str(ai_description or "").strip()
+def build_liability_description(op_type: str, raw_text: str, ai_description: str | None) -> str:
     t = str(raw_text or "").lower()
+    desc = str(ai_description or "").strip()
+
+    if "дтп" in t:
+        base = "за ДТП"
+    elif "телевиз" in t:
+        base = "за телевизор"
+    elif "парков" in t:
+        base = "за парковку"
+    elif "превыш" in t:
+        base = "за превышение"
+    elif "штраф" in t and op_type == "liability_plus":
+        base = "за штраф"
+    elif desc:
+        if desc.lower().startswith("за "):
+            base = desc
+        else:
+            base = f"за {desc}"
+    else:
+        base = ""
 
     if op_type == "liability_minus":
         if "штраф" in t:
-            if desc.lower().startswith("штраф"):
-                return desc
-            if desc.lower().startswith("за "):
-                return f"штраф {desc}"
-            return f"штраф за {desc}"
-        else:
-            if desc.lower().startswith("долг"):
-                return desc
-            if desc.lower().startswith("за "):
-                return f"долг {desc}"
-            return f"долг за {desc}"
+            return f"штраф {base}".strip()
+        return f"долг {base}".strip()
 
-    if op_type == "liability_plus":
-        if desc.lower().startswith("погашение") or desc.lower().startswith("погашення"):
-            return desc
-        if desc.lower().startswith("за "):
-            return f"погашение долга {desc}"
-        return f"погашение долга за {desc}"
-
-    return desc
+    return f"погашение долга {base}".strip()
 
 
-def write_expense_rows(ws, date_value, odometer, items, usd_rate, notes, odometer_estimated):
+def write_expense_rows(ws, date_value, odometer, items, usd_rate, odometer_estimated):
     start_row = get_next_expense_row(ws)
     rows = []
     current_row = start_row
@@ -594,19 +758,17 @@ def write_expense_rows(ws, date_value, odometer, items, usd_rate, notes, odomete
     for item in items:
         amount = float(item["amount"])
         usd_amount = round(amount / usd_rate, 2) if usd_rate else ""
-        note_value = notes if current_row == start_row else ""
         rows.append([
             date_value,               # E
             odometer,                 # F
             item["description"],      # G
             amount,                   # H
             usd_amount,               # I
-            note_value,               # J
         ])
         current_row += 1
 
     end_row = start_row + len(rows) - 1
-    update_range = f"E{start_row}:J{end_row}"
+    update_range = f"E{start_row}:I{end_row}"
     ws.update(update_range, rows)
     apply_blue_text(ws, update_range)
 
@@ -618,7 +780,7 @@ def write_expense_rows(ws, date_value, odometer, items, usd_rate, notes, odomete
     return start_row, end_row, total_amount
 
 
-def write_to_sheet(data: dict, raw_text: str = "") -> str:
+def write_single_action_to_sheet(data: dict, raw_text: str = "") -> str:
     spreadsheet = get_sheet()
     car_id = str(data.get("car_id", "")).strip()
     full_plate = full_plate_from_short(car_id)
@@ -627,7 +789,6 @@ def write_to_sheet(data: dict, raw_text: str = "") -> str:
     amount = float(data.get("amount", 0) or 0)
     odometer = data.get("odometer", "")
     description = data.get("description", "")
-    notes = data.get("notes", None)
     odometer_estimated = bool(data.get("odometer_estimated", False))
     op_type = data.get("type")
 
@@ -659,7 +820,6 @@ def write_to_sheet(data: dict, raw_text: str = "") -> str:
                 odometer=odometer,
                 items=TO_BUNDLE,
                 usd_rate=usd_rate,
-                notes=notes,
                 odometer_estimated=odometer_estimated,
             )
             return (
@@ -668,14 +828,14 @@ def write_to_sheet(data: dict, raw_text: str = "") -> str:
                 f"🧾 Додано 5 рядків\n"
                 f"💸 Загальна сума: {total_amount} грн\n"
                 f"📅 {date_value}\n"
-                f"📍 Внесено: лист '{sheet_name}', рядки {start_row}-{end_row}, стовпці E:J"
+                f"📍 Внесено: лист '{sheet_name}', рядки {start_row}-{end_row}, стовпці E:I"
                 f"{usd_note}"
             )
 
         next_row = get_next_expense_row(ws)
         usd_amount = round(amount / usd_rate, 2) if usd_rate else ""
 
-        update_range = f"E{next_row}:J{next_row}"
+        update_range = f"E{next_row}:I{next_row}"
         ws.update(
             update_range,
             [[
@@ -684,7 +844,6 @@ def write_to_sheet(data: dict, raw_text: str = "") -> str:
                 description,
                 amount,
                 usd_amount,
-                notes or "",
             ]]
         )
         apply_blue_text(ws, update_range)
@@ -698,12 +857,12 @@ def write_to_sheet(data: dict, raw_text: str = "") -> str:
             f"📋 {description}\n"
             f"💸 {amount} грн\n"
             f"📅 {date_value}\n"
-            f"📍 Внесено: лист '{sheet_name}', рядок {next_row}, стовпці E:J"
+            f"📍 Внесено: лист '{sheet_name}', рядок {next_row}, стовпці E:I"
             f"{usd_note}"
         )
 
     if op_type == "income":
-        next_row = get_next_income_row(ws)
+        next_row = get_next_right_block_row(ws)
         usd_amount = round(amount / usd_rate, 2) if usd_rate else ""
         prev_odo = get_previous_income_odometer(ws)
         mileage_delta = ""
@@ -744,7 +903,7 @@ def write_to_sheet(data: dict, raw_text: str = "") -> str:
         )
 
     if op_type in ["liability_minus", "liability_plus"]:
-        next_row = get_next_income_row(ws)
+        next_row = get_next_right_block_row(ws)
         sign_amount = -abs(amount) if op_type == "liability_minus" else abs(amount)
         liability_desc = build_liability_description(op_type, raw_text, description)
 
@@ -770,9 +929,30 @@ def write_to_sheet(data: dict, raw_text: str = "") -> str:
     return "❌ Невідомий тип операції"
 
 
+def write_actions_to_sheet(actions: list[dict], raw_text: str = "") -> str:
+    results = []
+    for action in actions:
+        results.append(write_single_action_to_sheet(action, raw_text=raw_text))
+    return "\n\n".join(results)
+
+
 def is_yes_statistical(text: str) -> bool:
     t = text.lower().strip()
     return t in ["так", "да", "yes", "ок", "окей", "ага"]
+
+
+def actions_need_odometer(actions: list[dict]) -> bool:
+    for action in actions:
+        if action.get("type") in ["expense", "income"] and action.get("odometer") in (None, ""):
+            return True
+    return False
+
+
+def fill_odometer_for_actions(actions: list[dict], odometer_value: int, estimated: bool):
+    for action in actions:
+        if action.get("type") in ["expense", "income"] and action.get("odometer") in (None, ""):
+            action["odometer"] = odometer_value
+            action["odometer_estimated"] = estimated
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -786,10 +966,50 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Incoming message from {user_id}: {text}")
 
     try:
+        if context.user_data.get("waiting_odometer_choice_actions"):
+            pending_actions = context.user_data.get("pending_actions", [])
+            numeric_odo = parse_numeric_text(text)
+
+            if numeric_odo:
+                fill_odometer_for_actions(pending_actions, numeric_odo, estimated=False)
+                context.user_data.pop("waiting_odometer_choice_actions", None)
+                context.user_data.pop("pending_actions", None)
+                result = write_actions_to_sheet(pending_actions, raw_text=text)
+                await update.message.reply_text(result)
+                return
+
+            if is_yes_statistical(text):
+                if not pending_actions:
+                    await update.message.reply_text("Немає даних для обробки.")
+                    return
+
+                first_car = pending_actions[0].get("car_id")
+                first_date = pending_actions[0].get("date")
+                estimated = estimate_odometer_for_car(first_car, first_date)
+                if not estimated:
+                    context.user_data.pop("waiting_odometer_choice_actions", None)
+                    context.user_data.pop("pending_actions", None)
+                    await update.message.reply_text(
+                        "Не вдалося обчислити середньостатистичний пробіг. Надішли, будь ласка, цифри одометра."
+                    )
+                    return
+
+                fill_odometer_for_actions(pending_actions, estimated, estimated=True)
+                context.user_data.pop("waiting_odometer_choice_actions", None)
+                context.user_data.pop("pending_actions", None)
+                result = write_actions_to_sheet(pending_actions, raw_text=text)
+                await update.message.reply_text(result)
+                return
+
+            await update.message.reply_text(
+                "Напиши «так», якщо мені додати середньостатистичний пробіг, або просто надішли цифри одометра."
+            )
+            return
+
         if context.user_data.get("waiting_odometer_choice"):
             pending_data = context.user_data.get("pending_data", {})
-
             numeric_odo = parse_numeric_text(text)
+
             if numeric_odo:
                 pending_data["odometer"] = numeric_odo
                 pending_data["odometer_estimated"] = False
@@ -804,19 +1024,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     return
 
-                result = write_to_sheet(pending_data, raw_text=text)
+                result = write_single_action_to_sheet(pending_data, raw_text=text)
                 context.user_data.pop("pending_data", None)
                 await update.message.reply_text(result)
                 return
 
             if is_yes_statistical(text):
                 car_id = pending_data.get("car_id")
+                operation_date = pending_data.get("date")
                 if not car_id:
                     context.user_data.pop("waiting_odometer_choice", None)
                     await update.message.reply_text("Спочатку вкажи номер машини.")
                     return
 
-                estimated = estimate_odometer_for_car(car_id)
+                estimated = estimate_odometer_for_car(car_id, operation_date)
                 if not estimated:
                     context.user_data.pop("waiting_odometer_choice", None)
                     await update.message.reply_text(
@@ -826,7 +1047,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 pending_data["odometer"] = estimated
                 pending_data["odometer_estimated"] = True
-                pending_data["notes"] = "Пробег проставлен автоматически"
                 pending_data["missing_fields"] = compute_missing_fields(pending_data, text)
 
                 context.user_data["pending_data"] = pending_data
@@ -838,7 +1058,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     return
 
-                result = write_to_sheet(pending_data, raw_text=text)
+                result = write_single_action_to_sheet(pending_data, raw_text=text)
                 context.user_data.pop("pending_data", None)
                 await update.message.reply_text(result)
                 return
@@ -849,6 +1069,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         await update.message.reply_text("⏳ Обробляю...")
+
+        heuristic_actions = heuristic_multi_parse(text)
+        if heuristic_actions:
+            for action in heuristic_actions:
+                action["car_id"] = resolve_car_id(action.get("car_id"))
+                action["date"] = normalize_date_short(action.get("date"))
+                action = apply_special_cases(action, text)
+                action["missing_fields"] = compute_missing_fields(action, text)
+
+            if actions_need_odometer(heuristic_actions):
+                context.user_data["pending_actions"] = heuristic_actions
+                context.user_data["waiting_odometer_choice_actions"] = True
+                await update.message.reply_text(
+                    "❓ Немає одометра.\nМені додати середньостатистичний пробіг?\nНапиши «так» або просто надішли цифри одометра."
+                )
+                return
+
+            result = write_actions_to_sheet(heuristic_actions, raw_text=text)
+            await update.message.reply_text(result)
+            return
 
         pending_data = context.user_data.get("pending_data")
 
@@ -899,7 +1139,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❓ Не вистачає даних.\n{question}")
             return
 
-        result = write_to_sheet(parsed, raw_text=text)
+        result = write_single_action_to_sheet(parsed, raw_text=text)
         context.user_data.pop("pending_data", None)
         context.user_data.pop("waiting_odometer_choice", None)
         await update.message.reply_text(result)
@@ -925,10 +1165,11 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• 8730 колодки Бош 370 грн одометр 470420\n"
         f"• 4553 приход 3800\n"
         f"• ТО 4553\n"
-        f"• 8730 штраф 200 грн за парковку\n"
-        f"• 4553 долг 1200 за телевизор\n"
-        f"• 4553 взял 1200 за долг\n"
-        f"• 4553 погасил за телевизор 1200\n\n"
+        f"• Штраф 200 за 8730\n"
+        f"• 1875 Разбил телевизор долг 1200\n"
+        f"• Взял 3800 за 9245\n"
+        f"• Взял 3800 за 7121 и взял 200 за дтп\n"
+        f"• Взял 3800 за 5725 и сверху взял 300 за штраф\n\n"
         f"Якщо не вистачить одометра — я або перепитаю, або підставлю середньостатистичний.",
         parse_mode="Markdown",
     )
@@ -936,7 +1177,9 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("pending_data", None)
+    context.user_data.pop("pending_actions", None)
     context.user_data.pop("waiting_odometer_choice", None)
+    context.user_data.pop("waiting_odometer_choice_actions", None)
     await update.message.reply_text("✅ Поточне введення скасовано.")
 
 

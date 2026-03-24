@@ -376,7 +376,7 @@ def build_oil_report(force=False):
         icon = oil_status_icon(remaining)
         out.append(f"{icon} {car} | {service_date} | {odo} | {format_km_value(remaining)} км")
 
-    report = "
+    report = """Стан масла:
 ".join(out) if out else "Немає даних по заміні масла."
     REPORT_CACHE["oil_report"] = report
     REPORT_CACHE["oil_report_ts"] = time.time()

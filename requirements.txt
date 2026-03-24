@@ -6,3 +6,4 @@ google-auth
 requests
 beautifulsoup4
 gspread-formatting
+APScheduler

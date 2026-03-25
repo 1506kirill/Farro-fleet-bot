@@ -468,40 +468,32 @@ def find_last_service_in_rows(rows, service_type: str):
 
 def get_current_odometer_from_rows(rows):
     """
-    Берем последнюю точку пробега по дате, а не просто нижнюю строку листа.
-    Это важно, потому что в расходах могут быть позже дописаны старые ремонты,
-    а в приходах стоять более свежий реальный текущий пробег.
+    Текущий одометр считаем так, как ты описал для таблицы:
+    1) берем ПОСЛЕДНЕЕ заполненное значение одометра в расходах (F)
+    2) берем ПОСЛЕДНЕЕ заполненное значение одометра в приходах (L)
+    3) выбираем БОЛЬШЕЕ из этих двух значений
 
-    Источники:
-    - расходы: E (дата), F (одометр)
-    - приходы: K (дата), L (одометр)
+    Это устойчивее для твоей структуры, чем выбор только по дате.
     """
-    points = []
+    last_expense_odo = None
+    last_income_odo = None
 
     for r in rows[7:]:
-        # Расходы E/F
         if len(r) > 5:
-            d = parse_short_date(r[4] if len(r) > 4 else None)
-            odo = parse_num(r[5])
-            if d and odo is not None:
-                points.append((d, odo, "expense"))
+            odo_f = parse_num(r[5])
+            if odo_f is not None:
+                last_expense_odo = odo_f
 
-        # Приходы K/L
         if len(r) > 11:
-            d = parse_short_date(r[10] if len(r) > 10 else None)
-            odo = parse_num(r[11])
-            if d and odo is not None:
-                points.append((d, odo, "income"))
+            odo_l = parse_num(r[11])
+            if odo_l is not None:
+                last_income_odo = odo_l
 
-    if not points:
+    candidates = [x for x in [last_expense_odo, last_income_odo] if x is not None]
+    if not candidates:
         return 0
 
-    # Сначала ищем самые свежие по дате точки
-    latest_date = max(p[0] for p in points)
-    latest_points = [p for p in points if p[0] == latest_date]
-
-    # Если на одну дату несколько точек, берем максимальный одометр
-    return max(p[1] for p in latest_points)
+    return max(candidates)
 
 def get_service_snapshot(force: bool = False):
     now = time.time()
@@ -554,7 +546,8 @@ def build_oil_report():
         if not odo:
             continue
         cur = get_current_odometer_from_rows(rows)
-        remaining = 10000 - (cur - odo)
+        effective_cur = max(cur, odo)
+        remaining = 10000 - (effective_cur - odo)
         icon = oil_status_icon(remaining)
         out.append(f"{icon} {car} | {service_date} | {odo} | {format_km_value(remaining)} км")
     return "\n".join(out) if out else "Немає даних по заміні масла."
@@ -574,7 +567,8 @@ def build_grm_report():
         if not odo:
             continue
         cur = get_current_odometer_from_rows(rows)
-        remaining = 50000 - (cur - odo)
+        effective_cur = max(cur, odo)
+        remaining = 50000 - (effective_cur - odo)
         icon = grm_status_icon(remaining)
         out.append(f"{icon} {car} | {service_date} | {odo} | {format_km_value(remaining)} км")
     return "\n".join(out) if out else "Немає даних по заміні ГРМ."
@@ -592,14 +586,16 @@ async def check_notifications(context: ContextTypes.DEFAULT_TYPE):
 
         _, odo = find_last_service_in_rows(rows, "oil")
         if odo:
-            remaining = 10000 - (cur - odo)
+            effective_cur = max(cur, odo)
+        remaining = 10000 - (effective_cur - odo)
             if remaining <= 1000:
                 msgs.append(f"🚗 {car} — масло через {format_km_value(remaining)} км")
 
         if car not in SKIP_GRM:
             _, odo = find_last_service_in_rows(rows, "grm")
             if odo:
-                remaining = 50000 - (cur - odo)
+                effective_cur = max(cur, odo)
+        remaining = 50000 - (effective_cur - odo)
                 if remaining <= 1000:
                     msgs.append(f"🚗 {car} — ГРМ через {format_km_value(remaining)} км")
 

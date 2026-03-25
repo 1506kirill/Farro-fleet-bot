@@ -1,4 +1,4 @@
-import os
+import oss
 import re
 import json
 import logging

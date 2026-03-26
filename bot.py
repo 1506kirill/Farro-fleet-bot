@@ -39,6 +39,10 @@ SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "")
 GOOGLE_CREDS   = os.environ.get("GOOGLE_CREDS", "")
 ALLOWED_USERS  = [int(x.strip()) for x in os.environ.get("ALLOWED_USERS","").split(",") if x.strip()]
 
+# Таблиця водіїв (вкладка "ТО і ГРМ")
+DRIVERS_SPREADSHEET_ID = "1WzJyXkrI6kUwg7vIRbssNwP5LM9-1-jK3b4SWSOHUYU"
+DRIVERS_SHEET_NAME     = "ТО и ГРМ"
+
 # Папка Google Drive зі страховками
 INSURANCE_DRIVE_FOLDER_ID = "1RPTf7BsuMU8Gfkhviajy-9_ug28hYGVy"
 INSURANCE_DRIVE_FOLDER_URL = f"https://drive.google.com/drive/folders/{INSURANCE_DRIVE_FOLDER_ID}"
@@ -66,7 +70,7 @@ INSURANCE_OFFICES_DNIPRO = {
     "євроінс":  {
         "name":    "Євроінс Україна",
         "hotline": "0 800 501 513",
-        "address": ["пл. Червона, 3, оф. 10-А", "вул. Миронова, 5"],
+        "address": ["вул. Степана Бандери, 19, прим. 4"],
         "web":     "https://euroins.com.ua",
     },
     "уніка":    {
@@ -944,6 +948,145 @@ def ins_report()->str:
     return "\n".join(x[1] for x in lines) or "Даних немає"
 
 
+
+def get_driver_info(car_id: str) -> Dict[str, str]:
+    """
+    Зчитує дані водія з таблиці водіїв.
+    Колонка A = номер авто, L = ім'я, M = тел1, N = тел2
+    """
+    try:
+        d = json.loads(GOOGLE_CREDS)
+        scopes = ["https://spreadsheets.google.com/feeds",
+                  "https://www.googleapis.com/auth/drive"]
+        creds  = Credentials.from_service_account_info(d, scopes=scopes)
+        client = gspread.authorize(creds)
+        sp     = client.open_by_key(DRIVERS_SPREADSHEET_ID)
+        # Шукаємо вкладку
+        ws = None
+        for sheet in sp.worksheets():
+            if DRIVERS_SHEET_NAME.lower() in sheet.title.lower():
+                ws = sheet; break
+        if not ws:
+            ws = sp.sheet1
+
+        rows = ws.get_all_values()
+        for row in rows[1:]:  # пропускаємо заголовок
+            cell_a = str(row[0]).strip() if row else ""
+            # Шукаємо по 4-значному номеру (car_id)
+            if car_id in cell_a or cell_a == car_id:
+                name  = str(row[11]).strip() if len(row) > 11 else ""
+                phone1= str(row[12]).strip() if len(row) > 12 else ""
+                phone2= str(row[13]).strip() if len(row) > 13 else ""
+                return {"name": name, "phone1": phone1, "phone2": phone2}
+    except Exception as e:
+        logger.error(f"get_driver_info: {e}")
+    return {"name": "—", "phone1": "—", "phone2": ""}
+
+
+def car_card(car_id: str) -> str:
+    """
+    Картка машини по команді з одним номером авто.
+    Показує: водій, телефон, прибуток/витрати за 30 днів,
+    борг, масло, ГРМ, страховка, амортизація за 90 днів.
+    """
+    # Дані з таблиці машини
+    snap = get_snap()
+    rows = next((v for t, v in snap.items()
+                 if car_id in t or VEHICLE_MAP.get(car_id, "") in t), None)
+    if not rows:
+        return f"❌ Машину {fp(car_id)} не знайдено в таблиці"
+
+    now   = datetime.now(KYIV_TZ)
+    today = now.date()
+    d30   = today - timedelta(days=30)
+    d90   = today - timedelta(days=90)
+
+    inc_30 = exp_30 = 0.0
+    inc_90 = exp_90 = 0.0
+    debt   = 0.0
+
+    for row in rows[7:]:
+        # Витрати (E=4, H=7)
+        ed = parse_date(row[4] if len(row) > 4 else None)
+        en = parse_num(row[7]  if len(row) > 7  else None)
+        if ed and en:
+            if ed >= d30: exp_30 += en
+            if ed >= d90: exp_90 += en
+
+        # Прибутки (K=10, M=12)
+        kd = parse_date(row[10] if len(row) > 10 else None)
+        kn = parse_num(row[12]  if len(row) > 12 else None)
+        if kd and kn:
+            if kd >= d30: inc_30 += kn
+            if kd >= d90: inc_90 += kn
+
+        # Борг (K=10 дата, P=15 сума)
+        pd_ = parse_date(row[10] if len(row) > 10 else None)
+        pv  = row[15] if len(row) > 15 else None
+        if pd_ and pv and str(pv).strip():
+            try: debt += float(str(pv).replace(",", ".").replace(" ", ""))
+            except: pass
+
+    # Амортизація за 90 днів
+    amort90 = (exp_90 / inc_90 * 100) if inc_90 > 0 else 0
+
+    # Масло
+    _, oil_odo = find_last_oil(rows)
+    cur        = get_current_odo(rows)
+    if oil_odo and cur:
+        oil_rem = 10000 - (max(cur, oil_odo) - oil_odo)
+        oil_str = f"{fmt_km(oil_rem)} км  {km_icon(oil_rem, 10000)}"
+    else:
+        oil_str = "даних немає"
+
+    # ГРМ
+    if car_id in SKIP_GRM:
+        grm_str = "ланцюг — без регламенту"
+    else:
+        _, grm_odo = find_last_grm(rows)
+        if grm_odo and cur:
+            grm_rem = 50000 - (max(cur, grm_odo) - grm_odo)
+            grm_str = f"{fmt_km(grm_rem)} км  {km_icon(grm_rem, 50000)}"
+        else:
+            grm_str = "даних немає"
+
+    # Страховка
+    end_d, company = find_insurance(rows)
+    if end_d:
+        dl      = (end_d - today).days
+        ins_str = f"{company} до {end_d.strftime('%d.%m.%y')}  {ins_icon(dl)}"
+    else:
+        ins_str = "даних немає"
+
+    # Водій з таблиці водіїв
+    drv     = get_driver_info(car_id)
+    drv_name= drv["name"] or "—"
+    phones  = " / ".join(p for p in [drv["phone1"], drv["phone2"]] if p and p != "—")
+    if not phones: phones = "—"
+
+    # Борг — якщо 0 то не показуємо
+    debt_str = f"{debt:,.0f} грн".replace(",", " ") if debt != 0 else "немає"
+
+    sep = "─" * 28
+    inc30_s  = f"{inc_30:,.0f}".replace(",", " ")
+    exp30_s  = f"{exp_30:,.0f}".replace(",", " ")
+    return (
+        f"🚗 {fp(car_id)}\n"
+        f"{sep}\n"
+        f"👤 Водій:         {drv_name}\n"
+        f"📞 Телефон:       {phones}\n"
+        f"{sep}\n"
+        f"💰 Дохід (30 дн): {inc30_s} грн\n"
+        f"💸 Витрати (30д): {exp30_s} грн\n"
+        f"📌 Борг:          {debt_str}\n"
+        f"{sep}\n"
+        f"🛢 До масла:      {oil_str}\n"
+        f"⚙️ До ГРМ:        {grm_str}\n"
+        f"🛡 Страховка:     {ins_str}\n"
+        f"{sep}\n"
+        f"📈 Аморт. (90д):  {amort90:.1f}%\n"
+    )
+
 def ins_single(car_id:str) -> str:
     """Детальна інформація про страховку конкретної машини"""
     snap = get_snap()
@@ -1061,6 +1204,22 @@ def is_grm_cmd(t:str)->bool:
 
 def is_ins_cmd(t:str)->bool:
     return t.lower().strip() in {"страховка","страхування","страховки","страховка?"}
+
+def detect_car_card(text: str) -> Optional[str]:
+    """
+    Визначає запит картки машини: лише номер авто (наприклад '4553', '8730').
+    Повертає car_id або None.
+    """
+    t = text.strip()
+    # Рівно 4 цифри або 4-значне число що є номером машини
+    if re.fullmatch(r"\d{4}", t) and t in VEHICLE_MAP:
+        return t
+    # Повний номер типу "KA8730IX"
+    resolved = resolve_car(t)
+    if resolved and text.strip() == t:
+        return resolved
+    return None
+
 
 def detect_ins_single(text:str)->Optional[str]:
     """Визначає запит по страховці конкретної машини: 'страховка 8730', '4553 страховая'"""
@@ -1187,6 +1346,13 @@ async def handle_msg(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 
         cm=det_month(text)
         if cm: await update.message.reply_text(monthly_sum(cm)); return
+
+        # Картка машини — просто номер авто (4553, 8730 тощо)
+        cc = detect_car_card(text)
+        if cc:
+            await update.message.reply_text("⏳ Збираю дані по машині...")
+            await update.message.reply_text(car_card(cc))
+            return
 
         # ── основна обробка ──────────────────────────────────
         await update.message.reply_text("⏳ Обробляю...")

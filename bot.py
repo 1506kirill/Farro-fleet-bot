@@ -1,3 +1,7 @@
+“””
+Бот автопарку — фінальна чиста версія
+“””
+
 import os, re, json, logging, tempfile
 from datetime import datetime, date, time, timedelta
 from statistics import median

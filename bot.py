@@ -1,7 +1,9 @@
-import os
-import re
-import json
-import logging
+"""
+Бот автопарку v2 — повністю переписаний алгоритм пошуку даних
+Виправлено: пошук масла/ГРМ, страховки, розпізнавання одометра, доходу
+"""
+
+import os, re, json, logging
 from datetime import datetime, date, time, timedelta
 from statistics import median
 from zoneinfo import ZoneInfo
@@ -14,9 +16,7 @@ import gspread
 from openai import OpenAI
 from google.oauth2.service_account import Credentials
 from telegram import Update
-from telegram.ext import (
-    Application, MessageHandler, CommandHandler, filters, ContextTypes,
-)
+from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 from gspread_formatting import format_cell_range, CellFormat, Color, TextFormat
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -30,11 +30,9 @@ CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "")
 GOOGLE_CREDS   = os.environ.get("GOOGLE_CREDS", "")
+ALLOWED_USERS  = [int(x.strip()) for x in os.environ.get("ALLOWED_USERS","").split(",") if x.strip()]
 
-ALLOWED_USERS_STR = os.environ.get("ALLOWED_USERS", "")
-ALLOWED_USERS = [int(x.strip()) for x in ALLOWED_USERS_STR.split(",") if x.strip()]
-
-# ─── 26 машин автопарку ───────────────────────────────────────────────────────
+# ── 26 машин ──────────────────────────────────────────────────────────────────
 FULL_PLATES = [
     "AI1457MM","АЕ0418ОР","АЕ2993РI","AE7935PI","КА3021ЕО","КА9489ЕР",
     "АЕ7121ТА","АЕ8204ТВ","AE2548TB","АЕ9245ТО","AE0736PK","AE4715TH",
@@ -42,92 +40,105 @@ FULL_PLATES = [
     "KA0349HO","BC9854PM","АЕ8391ТМ","AE4553XB","KA8730IX","AE5725OO",
     "СА6584КА","AI3531PH",
 ]
-SKIP_GRM = {"9245","5308","4715","8204","0736"}   # ланцюги — без регламенту
+SKIP_GRM = {"9245","5308","4715","8204","0736"}
 
 TO_BUNDLE = [
-    {"description":"Масло в двигатель",              "amount":780},
-    {"description":"Воздушный фильтр WX WA9545",     "amount":270},
-    {"description":"Газовые фильтра",                "amount":100},
-    {"description":"Масляный фильтр BO 0451103318",  "amount":160},
-    {"description":"Работы за ТО",                   "amount":300},
+    {"description":"Масло в двигатель",             "amount":780},
+    {"description":"Воздушный фильтр WX WA9545",    "amount":270},
+    {"description":"Газовые фильтра",               "amount":100},
+    {"description":"Масляный фильтр BO 0451103318", "amount":160},
+    {"description":"Работы за ТО",                  "amount":300},
 ]
 
-INSURANCE_DATE_COL    = 18  # R
-INSURANCE_COMPANY_COL = 19  # S
+# Ключові слова для пошуку замін
+OIL_KEYWORDS = [
+    "масло в двигатель","моторное масло","масло двигатель",
+    "работа за то","работы за то","замена масла","масляный фильтр",
+    "воздушный фильтр","газовые фильтр","масло в мотор",
+]
+GRM_KEYWORDS = [
+    "замена грм","комплект грм","ремень грм","ролик грм",
+    "набор грм","грм с помпой","замена ремня грм","грм помпа",
+    "замена грм с помпой",
+]
+INS_KEYWORDS = [
+    "страховк","осаго","каско","евроинс","уника","уаск",
+    "arsenal","арсенал","пзу","allianz","альянс",
+]
 
 REPORT_CACHE: Dict[str,Any] = {"snap":None,"ts":None}
 CACHE_TTL = 180
-
-_USD_CACHE: Dict[str,Any] = {"rate":None,"day":None}
+_USD_CACHE: Dict[str,Any]   = {"rate":None,"day":None}
 
 
 # ════════════════════════════════════════════════════════════
 # HELPERS
 # ════════════════════════════════════════════════════════════
 
-def extract_digits(v: str) -> str:
+def digits(v:str) -> str:
     return "".join(re.findall(r"\d+", str(v or "")))
 
-VEHICLE_MAP   = {extract_digits(p): p for p in FULL_PLATES if extract_digits(p)}
+VEHICLE_MAP   = {digits(p): p for p in FULL_PLATES if digits(p)}
 KNOWN_CAR_IDS = sorted(VEHICLE_MAP.keys())
 
 claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY) if CLAUDE_API_KEY else None
 openai_client = OpenAI(api_key=OPENAI_API_KEY)              if OPENAI_API_KEY else None
 
+def _blue():   return CellFormat(textFormat=TextFormat(foregroundColor=Color(0.067,0.392,0.784)))
+def _yellow(): return CellFormat(backgroundColor=Color(1,0.96,0.75))
 
-def _blue() -> CellFormat:
-    return CellFormat(textFormat=TextFormat(foregroundColor=Color(0.067,0.392,0.784)))
-
-def _yellow() -> CellFormat:
-    return CellFormat(backgroundColor=Color(1,0.96,0.75))
-
-def apply_blue(ws, r: str):
+def apply_blue(ws, r:str):
     try: format_cell_range(ws, r, _blue())
     except Exception as e: logger.error(f"blue: {e}")
 
-def mark_yellow(ws, r: str):
+def mark_yellow(ws, r:str):
     try: format_cell_range(ws, r, _yellow())
     except Exception as e: logger.error(f"yellow: {e}")
 
-
 def parse_num(v) -> Optional[int]:
-    s = re.sub(r"[^\d\-]","",str(v or "").strip())
+    s = re.sub(r"[^\d\-]","", str(v or "").strip().replace(" ",""))
     if not s: return None
     try: return int(s)
     except: return None
 
-def norm_date(s: Optional[str]) -> str:
+def parse_float(v) -> Optional[float]:
+    if v is None: return None
+    s = str(v).strip().replace(" ","").replace(",",".")
+    s = re.sub(r"[^\d\.\-]","",s)
+    try: return float(s) if s else None
+    except: return None
+
+def norm_date(s:Optional[str]) -> str:
     if not s: return datetime.now(KYIV_TZ).strftime("%d.%m.%y")
     for fmt in ("%d.%m.%Y","%d.%m.%y","%d-%m-%Y","%d-%m-%y"):
         try: return datetime.strptime(str(s).strip(),fmt).strftime("%d.%m.%y")
         except: pass
     return datetime.now(KYIV_TZ).strftime("%d.%m.%y")
 
-def parse_date(s: Optional[str]) -> Optional[date]:
+def parse_date(s:Optional[str]) -> Optional[date]:
     if not s: return None
     for fmt in ("%d.%m.%Y","%d.%m.%y","%d-%m-%Y","%d-%m-%y"):
         try: return datetime.strptime(str(s).strip(),fmt).date()
         except: pass
     return None
 
-def fmt_km(v: Optional[int]) -> str:
+def fmt_km(v:Optional[int]) -> str:
     if v is None: return "—"
     sign = "-" if v < 0 else ""
     return f"{sign}{abs(v):,}".replace(","," ")
 
-def resolve_car(v: Optional[str]) -> Optional[str]:
+def resolve_car(v:Optional[str]) -> Optional[str]:
     if not v: return None
-    raw    = str(v).strip().upper()
-    digits = extract_digits(raw)
-    if digits in VEHICLE_MAP: return digits
-    for k, fp in VEHICLE_MAP.items():
-        if raw == fp.upper(): return k
+    raw = str(v).strip().upper(); dg = digits(raw)
+    if dg in VEHICLE_MAP: return dg
+    for k, fp_ in VEHICLE_MAP.items():
+        if raw == fp_.upper(): return k
     return None
 
-def fp(car_id: Optional[str]) -> str:
+def fp(car_id:Optional[str]) -> str:
     return VEHICLE_MAP.get(car_id or "", car_id or "Невідомо")
 
-def clean_json(t: str) -> str:
+def clean_json(t:str) -> str:
     s = t.strip().replace("```json","").replace("```","").strip()
     a,b = s.find("{"), s.rfind("}")
     return s[a:b+1] if a!=-1 and b>a else s
@@ -138,12 +149,12 @@ def clean_json(t: str) -> str:
 # ════════════════════════════════════════════════════════════
 
 def open_sheet():
-    d = json.loads(GOOGLE_CREDS)
+    d      = json.loads(GOOGLE_CREDS)
     scopes = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
     creds  = Credentials.from_service_account_info(d, scopes=scopes)
     return gspread.authorize(creds).open_by_key(SPREADSHEET_ID)
 
-def find_ws(sp, car_id: str):
+def find_ws(sp, car_id:str):
     p = VEHICLE_MAP.get(car_id,"")
     for ws in sp.worksheets():
         if car_id in ws.title or (p and p in ws.title): return ws
@@ -160,36 +171,232 @@ def get_snap(force=False) -> Dict[str,List[List[str]]]:
     REPORT_CACHE = {"snap":snap,"ts":now}
     return snap
 
-def last_row(ws, c1:int, c2:int, start:int=8) -> int:
+def last_filled_row(ws, c1:int, c2:int, start:int=8) -> int:
     all_v = ws.get_all_values(); last = start-1
     for ri in range(start, len(all_v)+1):
         row = all_v[ri-1]
         if any(str(c).strip() for c in row[c1-1:c2]): last = ri
     return last
 
-def next_exp_row(ws)   -> int: return last_row(ws,5,9,8)+1
-def next_right_row(ws) -> int: return max(last_row(ws,11,15,8), last_row(ws,16,17,8))+1
+def next_exp_row(ws)   -> int: return last_filled_row(ws,5,9,8)+1
+def next_right_row(ws) -> int: return max(last_filled_row(ws,11,15,8), last_filled_row(ws,16,17,8))+1
 
 def prev_inc_odo(ws) -> Optional[int]:
+    """Останній одометр з колонки L (прибутки)"""
     all_v = ws.get_all_values(); odos=[]
     for row in all_v[7:]:
         v = parse_num(row[11] if len(row)>11 else None)
         if v: odos.append(v)
     return odos[-1] if odos else None
 
-def cur_odo(rows: List[List[str]]) -> Optional[int]:
-    f=l=None
+
+# ── ПОТОЧНИЙ ОДОМЕТР — максимум з F і L ──────────────────────────────────────
+
+def get_current_odo(rows:List[List[str]]) -> Optional[int]:
+    """Повертає максимальне значення одометра з усієї таблиці (F і L)"""
+    best = None
     for row in rows[7:]:
-        v=parse_num(row[5]  if len(row)>5  else None)
-        if v: f=v
-        v=parse_num(row[11] if len(row)>11 else None)
-        if v: l=v
-    vals=[x for x in [f,l] if x is not None]
-    return max(vals) if vals else None
+        # колонка F (індекс 5) — одометр у витратах
+        v = parse_num(row[5] if len(row)>5 else None)
+        if v and v>100000:  # фільтруємо явно не одометри
+            if best is None or v > best: best = v
+        # колонка L (індекс 11) — одометр у прибутках
+        v = parse_num(row[11] if len(row)>11 else None)
+        if v and v>100000:
+            if best is None or v > best: best = v
+    return best
 
 
 # ════════════════════════════════════════════════════════════
-# USD КУРС (кеш за день)
+# ПОШУК ОСТАННЬОЇ ЗАМІНИ МАСЛА
+# ════════════════════════════════════════════════════════════
+
+def _is_oil_block(descs: List[str]) -> bool:
+    """
+    Блок вважається заміною масла якщо є хоча б один з головних тригерів.
+    Ключовий тригер: 'масло в двигатель' АБО 'замена масла' АБО 'моторное масло'
+    Підтверджувальні: масляний фільтр, газові фільтри (разом дають ТО-блок)
+    """
+    joined = " ".join(descs).lower()
+    # Головні тригери
+    main_triggers = [
+        "масло в двигатель","моторное масло","замена масла","масло в мотор",
+        "замена моторного масла",
+    ]
+    for t in main_triggers:
+        if t in joined: return True
+    # ТО-блок: 'работа за то' + ('масляный фильтр' або 'воздушный фильтр')
+    if ("работа за то" in joined or "работы за то" in joined):
+        if "масляный фильтр" in joined or "воздушный фильтр" in joined:
+            return True
+    return False
+
+
+def _is_grm_block(descs: List[str]) -> bool:
+    """Блок вважається заміною ГРМ якщо є явний тригер"""
+    joined = " ".join(descs).lower()
+    grm_main = [
+        "замена грм","комплект грм","ремень грм","набор грм",
+        "грм с помпой","замена ремня грм","грм помпа",
+        "замена грм с помпой","ролик грм натяжн",
+    ]
+    for t in grm_main:
+        if t in joined: return True
+    # "грм" + одометр в тому ж блоці — достатньо
+    if re.search(r"\bгрм\b", joined):
+        return True
+    return False
+
+
+def find_last_oil(rows: List[List[str]]) -> Tuple[Optional[str], Optional[int]]:
+    """
+    Шукає ОСТАННЮ заміну масла в блоці витрат (колонки E/F/G).
+    Блок = всі рядки з однаковим одометром (колонка F).
+    Повертає (дата, одометр).
+    """
+    # Збираємо всі блоки — групуємо по одометру/даті
+    blocks: List[Dict] = []
+    cur_date = cur_odo = None
+    cur_descs: List[str] = []
+
+    for row in rows[7:]:
+        e = str(row[4]).strip() if len(row)>4 else ""
+        f = parse_num(row[5] if len(row)>5 else None)
+        g = str(row[6]).strip() if len(row)>6 else ""
+
+        # Новий блок якщо є і дата і одометр
+        if e and f and f > 100000:
+            if cur_date and cur_descs:
+                blocks.append({"date":cur_date,"odo":cur_odo,"descs":cur_descs[:]})
+            cur_date = e; cur_odo = f; cur_descs = []
+
+        if cur_date and g and len(g)>2:
+            cur_descs.append(g)
+
+    if cur_date and cur_descs:
+        blocks.append({"date":cur_date,"odo":cur_odo,"descs":cur_descs[:]})
+
+    # Шукаємо з кінця — останній блок з заміною масла
+    for blk in reversed(blocks):
+        if _is_oil_block(blk["descs"]):
+            return blk["date"], blk["odo"]
+
+    return None, None
+
+
+def find_last_grm(rows: List[List[str]]) -> Tuple[Optional[str], Optional[int]]:
+    """Шукає ОСТАННЮ заміну ГРМ"""
+    blocks: List[Dict] = []
+    cur_date = cur_odo = None
+    cur_descs: List[str] = []
+
+    for row in rows[7:]:
+        e = str(row[4]).strip() if len(row)>4 else ""
+        f = parse_num(row[5] if len(row)>5 else None)
+        g = str(row[6]).strip() if len(row)>6 else ""
+
+        if e and f and f > 100000:
+            if cur_date and cur_descs:
+                blocks.append({"date":cur_date,"odo":cur_odo,"descs":cur_descs[:]})
+            cur_date = e; cur_odo = f; cur_descs = []
+
+        if cur_date and g and len(g)>2:
+            cur_descs.append(g)
+
+    if cur_date and cur_descs:
+        blocks.append({"date":cur_date,"odo":cur_odo,"descs":cur_descs[:]})
+
+    for blk in reversed(blocks):
+        if _is_grm_block(blk["descs"]):
+            return blk["date"], blk["odo"]
+
+    return None, None
+
+
+# ════════════════════════════════════════════════════════════
+# ПОШУК СТРАХОВКИ
+# ════════════════════════════════════════════════════════════
+
+def find_insurance(rows: List[List[str]]) -> Tuple[Optional[date], Optional[str]]:
+    """
+    Шукає страховку в двох місцях:
+    1. Рядок A4 (рядок 3, колонка 0) — формат "Страховка до DD.MM.YY Компанія"
+    2. Колонка G (витрати) — шукає ОСТАННІЙ рядок з ключовими словами страховки
+    Повертає (дата_закінчення, назва_компанії)
+    """
+    results: List[Tuple[date, str]] = []
+
+    # 1. Перевіряємо A4 (рядок індекс 3, колонка 0)
+    if len(rows) > 3:
+        a4 = str(rows[3][0]).strip() if rows[3] else ""
+        if a4:
+            parsed = _parse_insurance_text(a4)
+            if parsed: results.append(parsed)
+
+    # 2. Шукаємо в колонці G (витрати, індекс 6) — ОСТАННЯ знайдена строка
+    for row in rows[7:]:
+        g = str(row[6]).strip() if len(row)>6 else ""
+        if not g: continue
+        g_lo = g.lower()
+        if any(k in g_lo for k in ["страховк","осаго","каско","евроинс"]):
+            parsed = _parse_insurance_text(g)
+            if parsed: results.append(parsed)
+
+    if not results: return None, None
+
+    # Беремо максимальну дату (найновішу страховку)
+    results.sort(key=lambda x: x[0], reverse=True)
+    return results[0]
+
+
+def _parse_insurance_text(text: str) -> Optional[Tuple[date, str]]:
+    """
+    Розбирає текст типу:
+    "Страховка до 29.04.26 Евроинс Каско Лайт и Осаго"
+    "Страховка до 31.12.26 Евроинс"
+    "Страховка ЄвроІнс ОСАГО і Каско до 02.04.2026"
+    Повертає (date, company_name) або None
+    """
+    text = text.strip()
+    if len(text) < 5: return None
+
+    # Шукаємо дату в форматах DD.MM.YY або DD.MM.YYYY
+    date_pattern = r"\b(\d{1,2}[.\-]\d{1,2}[.\-](?:\d{2}|\d{4}))\b"
+    dates_found  = re.findall(date_pattern, text)
+
+    parsed_date = None
+    for ds in dates_found:
+        d = parse_date(ds)
+        if d and d.year >= 2024:  # страховка не може бути старою
+            if parsed_date is None or d > parsed_date:
+                parsed_date = d
+
+    if not parsed_date: return None
+
+    # Назва компанії — ищем відомі назви
+    company = "—"
+    companies = [
+        "Евроинс","ЄвроІнс","Euroins",
+        "Уніка","Уника","Unica",
+        "УАСК","PZU","ПЗУ","Allianz","Альянс",
+        "Arsenal","Арсенал","ВУСО","Оранта",
+        "ТАС","Гарант","Аха","AXA",
+    ]
+    text_lo = text.lower()
+    for c in companies:
+        if c.lower() in text_lo:
+            company = c; break
+
+    # Якщо компанія не знайдена — беремо перше слово після "страховка"
+    if company == "—":
+        m = re.search(r"страховк[аи]\s+([А-ЯЄІЇҐа-яєіїґA-Za-z]+)", text, re.IGNORECASE)
+        if m: company = m.group(1)
+
+    return (parsed_date, company)
+
+
+# ════════════════════════════════════════════════════════════
+# USD КУРС
 # ════════════════════════════════════════════════════════════
 
 def get_usd() -> Optional[float]:
@@ -199,31 +406,32 @@ def get_usd() -> Optional[float]:
         r  = requests.get(MINFIN_URL, headers={"User-Agent":"Mozilla/5.0"}, timeout=15)
         r.raise_for_status()
         tx = BeautifulSoup(r.text,"html.parser").get_text(" ",strip=True)
-        for pat in [r"Средняя покупка\s*([0-9]+[.,][0-9]+)",
-                    r"Середня купівля\s*([0-9]+[.,][0-9]+)",
-                    r"Покупка\s*([0-9]+[.,][0-9]+)"]:
-            m = re.search(pat, tx, re.IGNORECASE)
+        for pat in [
+            r"Средняя покупка\s*([0-9]+[.,][0-9]+)",
+            r"Середня купівля\s*([0-9]+[.,][0-9]+)",
+            r"Покупка\s*([0-9]+[.,][0-9]+)",
+        ]:
+            m = re.search(pat,tx,re.IGNORECASE)
             if m:
                 rate = float(m.group(1).replace(",","."))
                 _USD_CACHE.update({"rate":rate,"day":today}); return rate
         for val in re.findall(r"\b([0-9]{2}[.,][0-9]{2})\b", tx):
             n = float(val.replace(",","."))
             if 35<=n<=50: _USD_CACHE.update({"rate":n,"day":today}); return n
-    except Exception as e:
-        logger.error(f"USD: {e}")
+    except Exception as e: logger.error(f"USD: {e}")
     return None
 
 
 # ════════════════════════════════════════════════════════════
-# ОДОМЕТР — СТАТИСТИКА 8 ТИЖНІВ
+# ОДОМЕТР — СТАТИСТИКА
 # ════════════════════════════════════════════════════════════
 
 def weekly_pts(ws) -> List[Tuple[date,int]]:
-    pts=[]
+    pts = []
     for row in ws.get_all_values()[7:]:
         d   = parse_date(row[10] if len(row)>10 else None)
         odo = parse_num(row[11]  if len(row)>11 else None)
-        if d and odo: pts.append((d,odo))
+        if d and odo and odo>100000: pts.append((d,odo))
     return pts[-8:]
 
 def estimate_odo(car_id:str, date_str:Optional[str]=None) -> Optional[int]:
@@ -237,16 +445,15 @@ def estimate_odo(car_id:str, date_str:Optional[str]=None) -> Optional[int]:
         if target<=ld: return lo
         rates=[]
         for i in range(1,len(pts)):
-            pd_,po = pts[i-1]; cd_,co = pts[i]
-            dd = (cd_-pd_).days; dk = co-po
+            pd_,po = pts[i-1]; cd_,co_ = pts[i]
+            dd = (cd_-pd_).days; dk = co_-po
             if dd>0 and 0<=dk<=7000:
                 r=dk/dd
                 if 0<=r<=300: rates.append(r)
         if rates:
             return int(round(lo + median(rates)*(target-ld).days))
         return lo
-    except Exception as e:
-        logger.error(f"estimate_odo: {e}"); return None
+    except Exception as e: logger.error(f"estimate_odo: {e}"); return None
 
 def odo_anomaly(ws, new_odo:int, date_str:Optional[str]) -> bool:
     pts = weekly_pts(ws)
@@ -259,7 +466,57 @@ def odo_anomaly(ws, new_odo:int, date_str:Optional[str]) -> bool:
 
 
 # ════════════════════════════════════════════════════════════
-# ВИЗНАЧЕННЯ ТИПУ
+# РОЗПІЗНАВАННЯ ОДОМЕТРА В ТЕКСТІ
+# ════════════════════════════════════════════════════════════
+
+def extract_odometer_from_text(text:str, car_id:Optional[str]=None) -> Optional[int]:
+    """
+    Витягує одометр з тексту.
+    Одометр — це велике число (>100000), яке НЕ є номером машини і НЕ є сумою.
+    Звичайна оренда = 3800, номер машини = 4-5 цифр зі VEHICLE_MAP.
+    """
+    nums = re.findall(r"\b(\d{5,7})\b", text)
+    for n_str in nums:
+        n = int(n_str)
+        # Пропускаємо номери машин
+        if n_str in VEHICLE_MAP: continue
+        if n_str.lstrip("0") in VEHICLE_MAP: continue
+        # Одометр завжди > 100000 і < 1000000
+        if 100000 <= n <= 999999:
+            return n
+    return None
+
+
+def extract_amount_from_text(text:str, car_id:Optional[str]=None) -> Optional[int]:
+    """
+    Витягує суму оплати з тексту.
+    Сума — невелике число (типово 1000-9999), яке не є одометром і не є номером авто.
+    """
+    # Шукаємо числа після слів "взяв","принял","взял","приход" тощо
+    pay_patterns = [
+        r"взяв\s+(\d+)",r"взял\s+(\d+)",r"принял\s+(\d+)",
+        r"приход\s+(\d+)",r"прийом\s+(\d+)",
+        r"(\d+)\s*грн",r"(\d+)\s*гривень",
+    ]
+    for pat in pay_patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            n = int(m.group(1))
+            if 100 <= n <= 50000 and str(n) not in VEHICLE_MAP:
+                return n
+
+    # Якщо нічого — шукаємо числа 1000-9999
+    nums = re.findall(r"\b(\d{4})\b", text)
+    for n_str in nums:
+        n = int(n_str)
+        if n_str in VEHICLE_MAP: continue
+        if 1000 <= n <= 9999: return n
+
+    return None
+
+
+# ════════════════════════════════════════════════════════════
+# ВИЗНАЧЕННЯ ТИПУ ОПЕРАЦІЇ
 # ════════════════════════════════════════════════════════════
 
 def is_to(t:str) -> bool:
@@ -268,9 +525,17 @@ def is_to(t:str) -> bool:
 
 def liab_type(t:str) -> Optional[str]:
     lo = str(t or "").lower()
-    if any(k in lo for k in ["взял","принял","погасил","дал ","дав "]): return "liability_plus"
-    if any(k in lo for k in ["штраф","долг","должен","должна","дожен","боргує"]): return "liability_minus"
+    # Спочатку перевіряємо "взяв/принял" — це частіше прибуток, а не борг
+    plus_kw  = ["взяв","взял","принял","погасил","погасив","дав ","дал "]
+    minus_kw = ["штраф","долг","борг","должен","должна","дожен","боргує"]
+    if any(k in lo for k in plus_kw): return "liability_plus"
+    if any(k in lo for k in minus_kw): return "liability_minus"
     return None
+
+def is_income_phrase(t:str) -> bool:
+    lo = str(t or "").lower()
+    return any(k in lo for k in ["приход","прибуток","прийом","оплата","аренда","оренда",
+                                   "взяв","взял","принял"])
 
 def liab_desc(op:str, raw:str, ai:Optional[str]) -> str:
     lo = str(raw or "").lower(); d = str(ai or "").strip()
@@ -278,7 +543,7 @@ def liab_desc(op:str, raw:str, ai:Optional[str]) -> str:
     elif "телевиз"  in lo: base="за телевизор"
     elif "парков"   in lo: base="за парковку"
     elif "превыш"   in lo: base="за превышение"
-    elif d: base = d if d.startswith("за ") else f"за {d}"
+    elif d: base = d if d.lower().startswith("за ") else f"за {d}"
     else:   base = ""
     today = datetime.now(KYIV_TZ).strftime("%d.%m.%y")
     if op=="liability_minus":
@@ -300,17 +565,19 @@ def build_prompt(msg:str, ex:Optional[dict]=None) -> str:
 Відомі машини:
 {cars}
 
-Правила:
-1. Будь-який порядок слів у повідомленні.
-2. car_id — тільки цифри зі списку.
-3. Дата DD.MM.YY, якщо немає — сьогодні.
-4. ДАНІ ДЛЯ ТАБЛИЦІ — РОСІЙСЬКОЮ. Відповіді — УКРАЇНСЬКОЮ.
-5. "ТО"/"плановое ТО" → description="ТО".
-6. штраф/долг/должен → liability_minus; взял/принял/погасил → liability_plus.
-7. Для liability_* одометр не потрібен.
-8. description для liability_* — тільки причина, без номера авто і суми.
-9. Якщо дві суми: більша (~3800) = income, менша = liability_plus.
-10. Тільки JSON, без пояснень.
+КРИТИЧНІ ПРАВИЛА РОЗПІЗНАВАННЯ ЧИСЕЛ:
+1. Число 5-7 цифр (100000-999999) — це ОДОМЕТР, не сума і не машина.
+2. Число 4 цифри зі списку машин — НОМЕР АВТО.
+3. Число 3800-4000 — частіше всього ОПЛАТА ОРЕНДИ (income).
+4. "Взяв/принял/прийняв X за Y" — завжди income, де X=сума, Y=номер авто.
+5. НЕ створюй liability_plus якщо є явне "взяв/принял" + сума + машина — це просто income.
+6. Якщо вказано одометр (велике число) — НЕ питай про одометр повторно.
+7. Дата DD.MM.YY, якщо немає — сьогодні.
+8. ДАНІ ДЛЯ ТАБЛИЦІ — РОСІЙСЬКОЮ. Відповіді — УКРАЇНСЬКОЮ.
+9. Якщо "ТО"/"плановое ТО" — description="ТО".
+10. штраф/долг/должен → liability_minus; тільки якщо немає ознак income.
+11. Для liability_* одометр не потрібен.
+12. Тільки JSON, без пояснень.
 
 Повідомлення: "{msg}"
 
@@ -319,9 +586,9 @@ JSON:
   "type": "expense"|"income"|"liability_minus"|"liability_plus"|null,
   "car_id": "4553"|null,
   "date": "DD.MM.YY",
-  "amount": 370,
-  "description": "Колодки Бош",
-  "odometer": 470420,
+  "amount": 3800,
+  "description": "",
+  "odometer": 354746,
   "notes": null,
   "missing_fields": []
 }}"""
@@ -395,13 +662,14 @@ def write_one(data:dict, raw:str="") -> str:
 
     # ── ВИТРАТА ──────────────────────────────────────────────
     if op_type=="expense":
-        if is_to(str(desc)) or str(desc).lower().strip() in {"то","плановое то","планове то"}:
-            rs = next_exp_row(ws); rows=[]
+        desc_lo = str(desc).lower().strip()
+        if desc_lo in {"то","плановое то","планове то"} or is_to(desc):
+            rs = next_exp_row(ws); rows_=[]
             for item in TO_BUNDLE:
                 u = round(item["amount"]/usd_rate,2) if usd_rate else ""
-                rows.append([date_val, odo, item["description"], item["amount"], u])
-            re_ = rs+len(rows)-1; rng=f"E{rs}:I{re_}"
-            ws.update(rng, rows); apply_blue(ws,rng)
+                rows_.append([date_val, odo, item["description"], item["amount"], u])
+            re_ = rs+len(rows_)-1; rng=f"E{rs}:I{re_}"
+            ws.update(rng, rows_); apply_blue(ws,rng)
             if odo_est:
                 for r in range(rs,re_+1): mark_yellow(ws,f"F{r}")
             total = sum(i["amount"] for i in TO_BUNDLE)
@@ -419,6 +687,7 @@ def write_one(data:dict, raw:str="") -> str:
     # ── ПРИБУТОК ─────────────────────────────────────────────
     if op_type=="income":
         r     = next_right_row(ws)
+        # Долар рахуємо від суми оренди (amount), а не від одометра!
         usd   = round(amount/usd_rate,2) if usd_rate else ""
         prev  = prev_inc_odo(ws)
         delta = ""
@@ -426,11 +695,12 @@ def write_one(data:dict, raw:str="") -> str:
             try: delta = int(odo)-int(prev)
             except: pass
         rng = f"K{r}:O{r}"
-        ws.update(rng,[[date_val,odo,amount,usd,delta]]); apply_blue(ws,rng)
+        # K=дата, L=одометр, M=сума грн, N=сума $, O=різниця пробігу
+        ws.update(rng,[[date_val, odo, amount, usd, delta]]); apply_blue(ws,rng)
         if odo_est: mark_yellow(ws,f"L{r}")
         dt = f"\n📈 Різниця пробігу: {delta} км" if delta!="" else ""
-        return (f"✅ Прибуток внесено!\n🚘 {plate}\n💰 {amount} грн\n"
-                f"📅 {date_val}\n📍 Одометр: {odo}\n"
+        return (f"✅ Прибуток внесено!\n🚘 {plate}\n💰 {amount} грн"
+                f"  (${usd})\n📅 {date_val}\n📍 Одометр: {odo}\n"
                 f"📍 «{sh}», рядок {r}, стовпці K:O{dt}{usd_note}")
 
     # ── БОРГИ / ШТРАФИ ────────────────────────────────────────
@@ -452,27 +722,48 @@ def write_all(actions:List[dict], raw:str="") -> str:
 
 
 # ════════════════════════════════════════════════════════════
-# ЕВРИСТИКА (без AI)
+# ЕВРИСТИКА — розпізнавання без AI
 # ════════════════════════════════════════════════════════════
 
-def find_car(text:str) -> Optional[str]:
-    for cid in sorted(KNOWN_CAR_IDS,key=len,reverse=True):
-        if re.search(rf"(?<!\d){re.escape(cid)}(?!\d)",text):
+def find_car_in_text(text:str) -> Optional[str]:
+    # Шукаємо з найдовших (щоб 9245 знайшлось раніше ніж 245)
+    for cid in sorted(KNOWN_CAR_IDS, key=len, reverse=True):
+        if re.search(rf"(?<!\d){re.escape(cid)}(?!\d)", text):
             return cid
     return None
 
 def heur(text:str) -> Optional[List[dict]]:
     t      = str(text or "").strip()
-    car_id = find_car(t)
+    car_id = find_car_in_text(t)
     if not car_id: return None
-    today  = norm_date(None)
-    nums   = [int(x) for x in re.findall(r"\d+",t)]
-    amounts= [n for n in nums if str(n)!=car_id and str(n) not in KNOWN_CAR_IDS and n>0]
-    lt     = liab_type(t)
+
+    today = norm_date(None)
+
+    # Витягуємо одометр з тексту (велике число)
+    odo = extract_odometer_from_text(t, car_id)
+
+    # Всі числа крім номера машини і одометра
+    all_nums = [int(x) for x in re.findall(r"\b\d+\b", t)]
+    amounts  = [n for n in all_nums
+                if str(n) != car_id
+                and str(n) not in VEHICLE_MAP
+                and (odo is None or n != odo)
+                and 100 <= n <= 99999]
+
+    lt = liab_type(t)
+    is_inc = is_income_phrase(t)
 
     if is_to(t):
         return [{"type":"expense","car_id":car_id,"date":today,"amount":0,
-                 "description":"ТО","odometer":None,"notes":None,"missing_fields":[]}]
+                 "description":"ТО","odometer":odo,"notes":None,"missing_fields":[]}]
+
+    # "Взяв/принял X за CAR" — однозначно income
+    m = re.search(r"(?:взяв|взял|принял|прийняв)\s+(\d+)\s+(?:грн\s+)?(?:за\s+)?"
+                  rf"(?:{re.escape(car_id)})", t, re.IGNORECASE)
+    if m or (is_inc and amounts):
+        amount = int(m.group(1)) if m else (max(amounts) if amounts else 0)
+        return [{"type":"income","car_id":car_id,"date":today,"amount":amount,
+                 "description":"","odometer":odo,"notes":None,"missing_fields":[]}]
 
     if lt=="liability_minus" and amounts:
         return [{"type":"liability_minus","car_id":car_id,"date":today,
@@ -480,30 +771,37 @@ def heur(text:str) -> Optional[List[dict]]:
                  "odometer":None,"notes":None,"missing_fields":[]}]
 
     if lt=="liability_plus" and len(amounts)==1:
+        # Якщо є одометр — схоже що це income, не погашення
+        if odo and amounts[0] < 10000:
+            return [{"type":"income","car_id":car_id,"date":today,"amount":amounts[0],
+                     "description":"","odometer":odo,"notes":None,"missing_fields":[]}]
         return [{"type":"liability_plus","car_id":car_id,"date":today,
                  "amount":amounts[0],"description":liab_desc("liability_plus",t,None),
                  "odometer":None,"notes":None,"missing_fields":[]}]
 
+    # Дві суми: більша = income, менша = погашення боргу
     if lt=="liability_plus" and len(amounts)>=2:
         sa = sorted(amounts,reverse=True)
         acts=[{"type":"income","car_id":car_id,"date":today,"amount":sa[0],
-               "description":"","odometer":None,"notes":None,"missing_fields":[]}]
+               "description":"","odometer":odo,"notes":None,"missing_fields":[]}]
         for x in sa[1:]:
             acts.append({"type":"liability_plus","car_id":car_id,"date":today,"amount":x,
                          "description":liab_desc("liability_plus",t,None),
                          "odometer":None,"notes":None,"missing_fields":[]})
         return acts
 
+    # Пакетний ввод через кому
     if "," in t:
-        parts=[ p.strip() for p in t.split(",") if p.strip() ]; acts=[]
+        parts=[p.strip() for p in t.split(",") if p.strip()]; acts=[]
         for part in parts:
             lo=part.lower()
-            pn=[int(x) for x in re.findall(r"\d+",part)]
-            pa=[n for n in pn if str(n)!=car_id and str(n) not in KNOWN_CAR_IDS and n>0]
+            pn=[int(x) for x in re.findall(r"\b\d+\b",part)]
+            pa=[n for n in pn if str(n)!=car_id and str(n) not in VEHICLE_MAP
+                and (odo is None or n!=odo) and 100<=n<=99999]
             pl=liab_type(lo)
-            if ("приход" in lo or "прибуток" in lo) and pa:
+            if ("приход" in lo or "прибуток" in lo or "прийом" in lo) and pa:
                 acts.append({"type":"income","car_id":car_id,"date":today,"amount":max(pa),
-                             "description":"","odometer":None,"notes":None,"missing_fields":[]})
+                             "description":"","odometer":odo,"notes":None,"missing_fields":[]})
             elif pl=="liability_minus" and pa:
                 acts.append({"type":"liability_minus","car_id":car_id,"date":today,"amount":pa[0],
                              "description":liab_desc("liability_minus",part,None),
@@ -513,13 +811,15 @@ def heur(text:str) -> Optional[List[dict]]:
                              "description":liab_desc("liability_plus",part,None),
                              "odometer":None,"notes":None,"missing_fields":[]})
         if acts: return acts
+
     return None
 
 
 def needs_odo(acts:List[dict]) -> bool:
-    return any(a.get("type") in ("expense","income") and a.get("odometer") in (None,"") for a in acts)
+    return any(a.get("type") in ("expense","income") and a.get("odometer") in (None,"")
+               for a in acts)
 
-def fill_odo(acts:List[dict], odo:int, est:bool):
+def fill_odo_all(acts:List[dict], odo:int, est:bool):
     for a in acts:
         if a.get("type") in ("expense","income") and a.get("odometer") in (None,""):
             a["odometer"]=odo; a["odometer_estimated"]=est
@@ -536,51 +836,16 @@ def miss_fields(data:dict, raw:str="") -> List[str]:
 
 def ask_miss(fields:List[str]) -> str:
     m={"type":"Вкажи тип: прихід, витрата, штраф чи борг.",
-       "car_id":f"Вкажи номер машини. Доступні: {', '.join(KNOWN_CAR_IDS)}",
+       "car_id":f"Вкажи номер машини. Доступні:\n{', '.join(KNOWN_CAR_IDS)}",
        "amount":"Вкажи суму в гривнях.",
        "description":"Вкажи опис або причину.",
-       "odometer":"Мені додати середньостатистичний пробіг? Напиши «так» або надішли цифри одометра."}
+       "odometer":"Мені додати середньостатистичний пробіг?\nНапиши «так» або надішли цифри одометра."}
     return m.get(fields[0],"Уточни відсутні дані.")
 
 
 # ════════════════════════════════════════════════════════════
-# ЗВІТИ
+# ЗВІТИ — МАСЛО / ГРМ / СТРАХОВКА
 # ════════════════════════════════════════════════════════════
-
-def _oil_score(tx:str) -> int:
-    s=0
-    if "масло в двигатель" in tx: s+=10
-    if "моторное масло"    in tx: s+=8
-    if "замена масла"      in tx: s+=8
-    if "масляный фильтр"   in tx: s+=4
-    if "масло"             in tx: s+=2
-    return s
-
-def _grm_score(tx:str) -> int:
-    s=0
-    if "комплект грм" in tx: s+=10
-    if "замена грм"   in tx: s+=10
-    if "ремень грм"   in tx: s+=7
-    if "ролик грм"    in tx: s+=6
-    if "грм"          in tx: s+=4
-    if "помпа"        in tx: s+=2
-    return s
-
-def last_service(rows:List[List[str]], mode:str) -> Tuple[Optional[str],Optional[int]]:
-    scorer = _oil_score if mode=="oil" else _grm_score
-    blocks=[]; cd=co=None; descs=[]
-    for row in rows[7:]:
-        e=row[4] if len(row)>4 else ""
-        f=parse_num(row[5] if len(row)>5 else None)
-        g=str(row[6]).strip().lower() if len(row)>6 else ""
-        if e and f is not None:
-            if descs: blocks.append({"date":cd,"odo":co,"tx":" | ".join(descs)})
-            cd=e; co=f; descs=[]
-        if cd and g: descs.append(g)
-    if descs: blocks.append({"date":cd,"odo":co,"tx":" | ".join(descs)})
-    for b in reversed(blocks):
-        if scorer(b["tx"])>=8: return b["date"],b["odo"]
-    return None,None
 
 def km_icon(rem:Optional[int], total:int) -> str:
     if rem is None: return "⚪"
@@ -597,47 +862,61 @@ def ins_icon(days:int) -> str:
     if days<=90: return "🟡"
     return "🟢"
 
+
 def oil_report() -> str:
     snap=get_snap(); lines=[]
-    for cid in KNOWN_CAR_IDS:
-        rows=next((v for t,v in snap.items() if cid in t or VEHICLE_MAP.get(cid,"") in t),None)
+    for car_id in KNOWN_CAR_IDS:
+        rows=next((v for t,v in snap.items() if car_id in t or VEHICLE_MAP.get(car_id,"") in t),None)
         if not rows: continue
-        ld,lo=last_service(rows,"oil"); co=cur_odo(rows)
-        if lo is None or co is None: continue
-        co=max(co,lo); rem=10000-(co-lo)
-        lines.append(f"{km_icon(rem,10000)} {cid} | {ld} | {lo:,} | {fmt_km(rem)} км")
-    return "\n".join(lines) or "Даних немає"
+        ld,lo = find_last_oil(rows)
+        co    = get_current_odo(rows)
+        if lo is None or co is None: lines.append(f"⚪ {car_id} | даних немає"); continue
+        co  = max(co,lo)
+        rem = 10000-(co-lo)
+        icon= km_icon(rem,10000)
+        lines.append((rem, f"{icon} {car_id} | {ld} | {lo:,} | {fmt_km(rem)} км"))
+
+    # Сортуємо від найближчих до заміни
+    lines_sorted = sorted([x for x in lines if isinstance(x,tuple)], key=lambda x:x[0])
+    txt_lines    = [x[1] for x in lines_sorted] + [x for x in lines if isinstance(x,str)]
+    return "\n".join(txt_lines) if txt_lines else "Даних немає"
+
 
 def grm_report() -> str:
     snap=get_snap(); lines=[]
-    for cid in KNOWN_CAR_IDS:
-        if cid in SKIP_GRM: continue
-        rows=next((v for t,v in snap.items() if cid in t or VEHICLE_MAP.get(cid,"") in t),None)
+    for car_id in KNOWN_CAR_IDS:
+        if car_id in SKIP_GRM: continue
+        rows=next((v for t,v in snap.items() if car_id in t or VEHICLE_MAP.get(car_id,"") in t),None)
         if not rows: continue
-        ld,lo=last_service(rows,"grm"); co=cur_odo(rows)
-        if lo is None or co is None: continue
-        co=max(co,lo); rem=50000-(co-lo)
-        lines.append(f"{km_icon(rem,50000)} {cid} | {ld} | {lo:,} | {fmt_km(rem)} км")
-    return "\n".join(lines) or "Даних немає"
+        ld,lo = find_last_grm(rows)
+        co    = get_current_odo(rows)
+        if lo is None or co is None: lines.append((999999, f"⚪ {car_id} | даних немає")); continue
+        co  = max(co,lo)
+        rem = 50000-(co-lo)
+        icon= km_icon(rem,50000)
+        lines.append((rem, f"{icon} {car_id} | {ld} | {lo:,} | {fmt_km(rem)} км"))
+
+    lines.sort(key=lambda x:x[0])
+    return "\n".join(x[1] for x in lines) if lines else "Даних немає"
+
 
 def ins_report() -> str:
     snap=get_snap(); today=datetime.now(KYIV_TZ).date(); lines=[]
-    for cid in KNOWN_CAR_IDS:
-        rows=next((v for t,v in snap.items() if cid in t or VEHICLE_MAP.get(cid,"") in t),None)
+    for car_id in KNOWN_CAR_IDS:
+        rows=next((v for t,v in snap.items() if car_id in t or VEHICLE_MAP.get(car_id,"") in t),None)
         if not rows: continue
-        best=None
-        for row in rows[7:]:
-            if len(row)>=INSURANCE_COMPANY_COL:
-                d=parse_date(row[INSURANCE_DATE_COL-1]); c=str(row[INSURANCE_COMPANY_COL-1]).strip()
-                if d and c and (best is None or d>best[0]): best=(d,c)
-        if not best: continue
-        ed,co=best; dl=(ed-today).days
-        lines.append((dl,f"{ins_icon(dl)} {cid} | {ed.strftime('%d.%m.%y')} | {co}"))
+        end_d, company = find_insurance(rows)
+        if not end_d: lines.append((99999,f"⚪ {car_id} | страховки немає")); continue
+        dl   = (end_d-today).days
+        icon = ins_icon(dl)
+        lines.append((dl, f"{icon} {car_id} | {end_d.strftime('%d.%m.%y')} | {company}"))
+
     lines.sort(key=lambda x:x[0])
-    return "\n".join(x[1] for x in lines) or "Даних немає"
+    return "\n".join(x[1] for x in lines) if lines else "Даних немає"
+
 
 def monthly_sum(car_id:str) -> str:
-    ws=find_ws(open_sheet(),car_id)
+    ws = find_ws(open_sheet(),car_id)
     if not ws: return f"❌ Машину {car_id} не знайдено"
     now=datetime.now(KYIV_TZ); m,y=now.month,now.year
     inc=exp=lib=0.0
@@ -651,7 +930,7 @@ def monthly_sum(car_id:str) -> str:
         if len(row)>15:
             d=parse_date(row[10] if len(row)>10 else None); rp=row[15] if len(row)>15 else None
             if d and d.month==m and d.year==y and str(rp).strip():
-                try: lib+=float(str(rp).replace(",","."))
+                try: lib+=float(str(rp).replace(",",".").replace(" ",""))
                 except: pass
     return (f"📊 Поточний місяць — {fp(car_id)}:\n"
             f"💰 Дохід: {inc:,.0f} грн\n💸 Витрати: {exp:,.0f} грн\n📌 Борги: {lib:,.0f} грн")
@@ -663,35 +942,42 @@ def monthly_sum(car_id:str) -> str:
 
 async def notify(ctx: ContextTypes.DEFAULT_TYPE):
     snap=get_snap(force=True); today=datetime.now(KYIV_TZ).date()
-    oil=[]; grm_=[]; ins=[]
-    for cid in KNOWN_CAR_IDS:
-        rows=next((v for t,v in snap.items() if cid in t or VEHICLE_MAP.get(cid,"") in t),None)
-        if not rows: continue
-        co=cur_odo(rows)
-        _,lo=last_service(rows,"oil")
-        if lo and co:
-            rem=10000-(max(co,lo)-lo)
-            if rem<=1000: oil.append(f"  {km_icon(rem,10000)} {cid} — {fmt_km(rem)} км")
-        if cid not in SKIP_GRM:
-            _,go=last_service(rows,"grm")
-            if go and co:
-                rem=50000-(max(co,go)-go)
-                if rem<=1000: grm_.append(f"  {km_icon(rem,50000)} {cid} — {fmt_km(rem)} км")
-        best=None
-        for row in rows[7:]:
-            if len(row)>=INSURANCE_COMPANY_COL:
-                d=parse_date(row[INSURANCE_DATE_COL-1]); c=str(row[INSURANCE_COMPANY_COL-1]).strip()
-                if d and c and (best is None or d>best[0]): best=(d,c)
-        if best:
-            dl=(best[0]-today).days
-            if dl<=14: ins.append(f"  {ins_icon(dl)} {cid} — {dl} дн. ({best[1]})")
+    oil=[]; grm_=[]; ins_=[]
 
+    for car_id in KNOWN_CAR_IDS:
+        rows=next((v for t,v in snap.items() if car_id in t or VEHICLE_MAP.get(car_id,"") in t),None)
+        if not rows: continue
+        co = get_current_odo(rows)
+
+        # Масло
+        ld_oil, lo = find_last_oil(rows)
+        if lo and co:
+            rem = 10000-(max(co,lo)-lo)
+            if rem<=1000:
+                oil.append((rem, f"  {km_icon(rem,10000)} {car_id} — {fmt_km(rem)} км до масла"))
+
+        # ГРМ
+        if car_id not in SKIP_GRM:
+            ld_grm, go = find_last_grm(rows)
+            if go and co:
+                rem = 50000-(max(co,go)-go)
+                if rem<=1000:
+                    grm_.append((rem, f"  {km_icon(rem,50000)} {car_id} — {fmt_km(rem)} км до ГРМ"))
+
+        # Страховка
+        end_d, company = find_insurance(rows)
+        if end_d:
+            dl = (end_d-today).days
+            if dl<=14:
+                ins_.append((dl, f"  {ins_icon(dl)} {car_id} — {dl} дн. ({end_d.strftime('%d.%m.%y')}) {company}"))
+
+    oil.sort(key=lambda x:x[0]); grm_.sort(key=lambda x:x[0]); ins_.sort(key=lambda x:x[0])
     msgs=[]
-    if oil:  msgs.append("🛢 Масло ≤1000 км:\n"+"\n".join(oil))
-    if grm_: msgs.append("⚙️ ГРМ ≤1000 км:\n"+"\n".join(grm_))
-    if ins:  msgs.append("🛡 Страховка ≤14 дн.:\n"+"\n".join(ins))
+    if oil:  msgs.append("🛢 Масло ≤1000 км:\n"+"\n".join(x[1] for x in oil))
+    if grm_: msgs.append("⚙️ ГРМ ≤1000 км:\n"+"\n".join(x[1] for x in grm_))
+    if ins_: msgs.append("🛡 Страховка ≤14 дн.:\n"+"\n".join(x[1] for x in ins_))
     if not msgs: return
-    text="⚠️ Автонагадування:\n\n"+"\n\n".join(msgs)
+    text="⚠️ Нагадування:\n\n"+"\n\n".join(msgs)
     for uid in ALLOWED_USERS:
         try: await ctx.bot.send_message(chat_id=uid, text=text)
         except Exception as e: logger.error(f"notify {uid}: {e}")
@@ -701,19 +987,30 @@ async def notify(ctx: ContextTypes.DEFAULT_TYPE):
 # ДЕТЕКТОРИ КОМАНД
 # ════════════════════════════════════════════════════════════
 
-def is_oil_cmd(t:str)  -> bool: return t.lower().strip() in {"масло","замена масла","заміна масла"}
-def is_grm_cmd(t:str)  -> bool: return t.lower().strip() in {"грм","замена грм","комплект грм","заміна грм"}
-def is_ins_cmd(t:str)  -> bool: return t.lower().strip() in {"страховка","страхування","страховки"}
+def is_oil_cmd(t:str)  -> bool:
+    lo=t.lower().strip()
+    return lo in {"масло","замена масла","заміна масла","масло?","масла"}
+
+def is_grm_cmd(t:str)  -> bool:
+    lo=t.lower().strip()
+    return lo in {"грм","замена грм","комплект грм","заміна грм","грм?"}
+
+def is_ins_cmd(t:str)  -> bool:
+    lo=t.lower().strip()
+    return lo in {"страховка","страхування","страховки","страховка?"}
+
 def det_month(t:str)   -> Optional[str]:
-    if any(k in t.lower() for k in ["місяць","месяц","місяц"]): return find_car(t)
+    if any(k in t.lower() for k in ["місяць","месяц","місяц"]):
+        return find_car_in_text(t)
     return None
-def is_yes(t:str)      -> bool: return t.lower().strip() in {"так","да","yes","ок","окей","ага","добре"}
-def is_yes_c(t:str)    -> bool: return t.lower().strip() in {"так","да","yes","новий","новая","підтвердити"}
-def is_no_c(t:str)     -> bool: return t.lower().strip() in {"ні","нет","дубль","скасувати","отмена","cancel"}
+
+def is_yes(t:str)   -> bool: return t.lower().strip() in {"так","да","yes","ок","окей","ага","добре"}
+def is_yes_c(t:str) -> bool: return t.lower().strip() in {"так","да","yes","новий","новая","підтвердити"}
+def is_no_c(t:str)  -> bool: return t.lower().strip() in {"ні","нет","дубль","скасувати","отмена","cancel"}
 
 
 # ════════════════════════════════════════════════════════════
-# TELEGRAM
+# TELEGRAM HANDLERS
 # ════════════════════════════════════════════════════════════
 
 async def handle_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -742,16 +1039,15 @@ async def handle_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             elif is_no_c(text):
                 ud.pop("w_anom",None); ud["w_odo"]=True; ud["acts_odo"]=acts; ud.pop("acts_anom",None)
                 await update.message.reply_text("Надішли правильний одометр або «так» для статистичного.")
-            else:
-                await update.message.reply_text("Напиши «так» або «ні».")
+            else: await update.message.reply_text("Напиши «так» або «ні».")
             return
 
         # ── очікування одометра ──────────────────────────────
         if ud.get("w_odo"):
             acts=ud.get("acts_odo",[])
             num=parse_num(text)
-            if num is not None:
-                fill_odo(acts,num,False); ud.pop("w_odo",None);ud.pop("acts_odo",None)
+            if num is not None and num>100000:
+                fill_odo_all(acts,num,False); ud.pop("w_odo",None);ud.pop("acts_odo",None)
                 first=next((a for a in acts if a.get("type") in ("expense","income")),None)
                 if first:
                     ws=find_ws(open_sheet(),first["car_id"])
@@ -770,7 +1066,7 @@ async def handle_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 if not first: await update.message.reply_text(write_all(acts,text)); return
                 est=estimate_odo(first["car_id"],first.get("date"))
                 if not est: await update.message.reply_text("Не вдалося розрахувати. Надішли цифри."); return
-                fill_odo(acts,est,True); ud.pop("w_odo",None);ud.pop("acts_odo",None)
+                fill_odo_all(acts,est,True); ud.pop("w_odo",None);ud.pop("acts_odo",None)
                 sp=open_sheet()
                 for a in acts:
                     ws=find_ws(sp,a["car_id"])
@@ -778,19 +1074,21 @@ async def handle_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         ud["w_dup"]=True;ud["acts_dup"]=acts
                         await update.message.reply_text("❓ Це новий запис чи дубль?"); return
                 await update.message.reply_text(write_all(acts,text)); return
-            await update.message.reply_text("Напиши «так» або цифри одометра."); return
+            await update.message.reply_text("Надішли цифри одометра (6 цифр) або напиши «так»."); return
 
         # ── очікування поля ──────────────────────────────────
         if ud.get("w_field"):
             pending=ud.get("pending",{}); miss=pending.get("missing_fields",[]); f=miss[0] if miss else None
             if f=="odometer":
-                num=parse_num(text)
-                if num is not None: pending["odometer"]=num;pending["odometer_estimated"]=False;pending["missing_fields"]=miss_fields(pending,text)
+                # Перевіряємо чи є великe число в тексті
+                odo_in_text = extract_odometer_from_text(text)
+                if odo_in_text:
+                    pending["odometer"]=odo_in_text;pending["odometer_estimated"]=False;pending["missing_fields"]=miss_fields(pending,text)
                 elif is_yes(text):
                     est=estimate_odo(pending.get("car_id"),pending.get("date"))
                     if est: pending["odometer"]=est;pending["odometer_estimated"]=True;pending["missing_fields"]=miss_fields(pending,text)
                     else: await update.message.reply_text("Не вдалося. Надішли цифри."); return
-                else: await update.message.reply_text("«так» або цифри одометра."); return
+                else: await update.message.reply_text("«так» або цифри одометра (6 знаків)."); return
             elif f=="car_id":  pending["car_id"]=resolve_car(text);pending["missing_fields"]=miss_fields(pending,text)
             elif f=="amount":  pending["amount"]=parse_num(text);pending["missing_fields"]=miss_fields(pending,text)
             elif f=="description": pending["description"]=text;pending["missing_fields"]=miss_fields(pending,text)
@@ -802,24 +1100,30 @@ async def handle_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         # ── команди звітів ───────────────────────────────────
         if is_oil_cmd(text):
-            await update.message.reply_text("⏳ Будую звіт...")
-            await update.message.reply_text("🛢 Масло (дата | одометр | залишок):\n\n"+oil_report()); return
+            await update.message.reply_text("⏳ Будую звіт по маслу...")
+            await update.message.reply_text(
+                "🛢 Масло — дата ост.заміни | одометр заміни | залишок:\n\n"+oil_report()); return
         if is_grm_cmd(text):
-            await update.message.reply_text("⏳ Будую звіт...")
-            await update.message.reply_text("⚙️ ГРМ (дата | одометр | залишок):\n\n"+grm_report()); return
+            await update.message.reply_text("⏳ Будую звіт по ГРМ...")
+            await update.message.reply_text(
+                "⚙️ ГРМ — дата ост.заміни | одометр заміни | залишок:\n\n"+grm_report()); return
         if is_ins_cmd(text):
-            await update.message.reply_text("⏳ Будую звіт...")
-            await update.message.reply_text("🛡 Страховки:\n\n"+ins_report()); return
+            await update.message.reply_text("⏳ Будую звіт по страховках...")
+            await update.message.reply_text(
+                "🛡 Страховки — машина | до якої дати | компанія:\n\n"+ins_report()); return
         cm=det_month(text)
         if cm: await update.message.reply_text(monthly_sum(cm)); return
 
         # ── основна обробка ──────────────────────────────────
         await update.message.reply_text("⏳ Обробляю...")
+
+        # Евристика
         h_acts=heur(text)
         if h_acts:
             if needs_odo(h_acts):
                 ud["w_odo"]=True;ud["acts_odo"]=h_acts
-                await update.message.reply_text("❓ Немає одометра.\nДодати середньостатистичний? «так» або цифри."); return
+                await update.message.reply_text(
+                    "❓ Немає одометра.\nДодати середньостатистичний? «так» або надішли 6-значні цифри."); return
             sp=open_sheet()
             for a in h_acts:
                 ws=find_ws(sp,a["car_id"])
@@ -828,10 +1132,15 @@ async def handle_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text("❓ Новий запис чи дубль?"); return
             await update.message.reply_text(write_all(h_acts,text)); return
 
+        # AI
         parsed=ask_ai(text,ud.get("pending"))
         if "error" in parsed: await update.message.reply_text(f"❌ AI: {parsed['error']}"); return
         parsed["car_id"]=resolve_car(parsed.get("car_id"))
         parsed["date"]=norm_date(parsed.get("date"))
+        # Якщо AI не вказав одометр, але він є в тексті — підставляємо
+        if parsed.get("odometer") in (None,""):
+            odo_in_msg = extract_odometer_from_text(text)
+            if odo_in_msg: parsed["odometer"] = odo_in_msg
         parsed["missing_fields"]=miss_fields(parsed,text)
 
         if parsed.get("missing_fields"):
@@ -856,11 +1165,11 @@ async def handle_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"👋 Привіт! Бот автопарку.\n\nМій Telegram ID: `{update.effective_user.id}`\n\n"
+        f"👋 Привіт! Бот автопарку v2.\n\nТвій ID: `{update.effective_user.id}`\n\n"
         f"Машини: {', '.join(KNOWN_CAR_IDS)}\n\n"
         f"Приклади:\n"
-        f"• 8730 колодки Бош 370 грн одометр 470420\n"
-        f"• Взяв 3800 за 4553 одометр 269518\n"
+        f"• Взяв 3800 за 9245 Одометр 354746\n"
+        f"• 8730 колодки Бош 370 грн 470420\n"
         f"• ТО 5725\n"
         f"• Штраф 200 за 8730 парковка\n"
         f"• 8730 приход 3800, долг 200 за дтп\n"
@@ -880,7 +1189,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
     app.job_queue.run_daily(notify, time=time(9,  15, tzinfo=KYIV_TZ))
     app.job_queue.run_daily(notify, time=time(16,  0, tzinfo=KYIV_TZ))
-    logger.info("Bot started!")
+    logger.info("Bot v2 started!")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":

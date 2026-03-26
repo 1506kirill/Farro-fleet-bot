@@ -1576,4 +1576,4 @@ logger.info(“Bot started!”)
 app.run_polling(drop_pending_updates=True)
 
 if **name** == “**main**”:
-main()
+main()зе

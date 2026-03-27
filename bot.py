@@ -1307,8 +1307,9 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
 
         await update.message.reply_text(f"🎙 Розпізнано: {text}")
-        update.message.text = text
-        await handle_msg(update, ctx)
+        # Передаём текст через контекст вместо изменения message.text
+        ctx.user_data["_voice_text"] = text
+        await handle_msg_text(update, ctx, text)
 
     except Exception as e:
         logger.exception("handle_voice")
@@ -1319,12 +1320,32 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ОСНОВНИЙ ОБРОБНИК ПОВІДОМЛЕНЬ
 # ════════════════════════════════════════════════════════════
 
+async def handle_msg_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE, override_text: str = None):
+    """Основной обработчик с поддержкой голосового ввода"""
+    if override_text:
+        # Подменяем текст для голосовых сообщений
+        original_text = getattr(update.message, '_text', None)
+        update._message._text = override_text
+        try:
+            await _handle_msg_impl(update, ctx)
+        finally:
+            update._message._text = original_text
+        return
+    await _handle_msg_impl(update, ctx)
+
+
 async def handle_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await _handle_msg_impl(update, ctx)
+
+
+async def _handle_msg_impl(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
     if ALLOWED_USERS and uid not in ALLOWED_USERS:
         await update.message.reply_text("⛔ Доступ заборонено")
         return
-    text = (update.message.text or "").strip()
+    # Получаем текст — либо из голосового override, либо из сообщения
+    voice_override = ctx.user_data.pop("_voice_text", None)
+    text = voice_override or (update.message.text or "").strip()
     logger.info(f"[{uid}] {text}")
     ud   = ctx.user_data
 

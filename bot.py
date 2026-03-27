@@ -755,17 +755,16 @@ def write_one(data: dict, raw: str = "") -> str:
         )
 
     if op_type in ("liability_minus", "liability_plus"):
-        # Находим следующую пустую строку в колонке P
+        # Находим ПОСЛЕДНЮЮ заполненную строку в P или Q, пишем после неё
         all_v = ws.get_all_values()
-        p_row = 8
+        last_p = 7
         for ri in range(8, len(all_v) + 1):
-            row = all_v[ri - 1] if ri <= len(all_v) else []
+            row = all_v[ri - 1]
             pv  = row[15] if len(row) > 15 else ""
-            if not str(pv).strip():
-                p_row = ri
-                break
-        else:
-            p_row = len(all_v) + 1
+            qv  = row[16] if len(row) > 16 else ""
+            if str(pv).strip() or str(qv).strip():
+                last_p = ri
+        p_row = last_p + 1
 
         sign = -abs(amount) if op_type == "liability_minus" else abs(amount)
         ld   = liab_desc(op_type, raw, desc)

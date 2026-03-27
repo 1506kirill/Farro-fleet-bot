@@ -102,9 +102,9 @@ _USD_CACHE: Dict[str,Any]   = {"rate":None,"day":None}
 
 def words_to_numbers(text: str) -> str:
     """
-    Конвертирует числительные в цифры для распознавания номеров авто голосом.
-    "ноль шесть шестьдесят пять" -> "0665"
-    "сорок семь пятнадцать" -> "4715"
+    Конвертирует числительные в цифры.
+    "ноль четыре восемнадцать" -> "0418"
+    "страховка 04-18" -> "страховка 0418"
     """
     ones = {
         "ноль":"0","нуль":"0",
@@ -145,6 +145,8 @@ def words_to_numbers(text: str) -> str:
                 compounds[f"{t_word} {o_word}"] = str(int(t_val) + int(o_val))
 
     result = text.lower()
+    # Нормализуем дефисы: "04-18" -> "04 18"
+    result = re.sub(r"(\d+)-(\d+)", r"\1 \2", result)
 
     for phrase in sorted(compounds.keys(), key=lambda x: -len(x)):
         result = result.replace(phrase, compounds[phrase])
@@ -156,14 +158,18 @@ def words_to_numbers(text: str) -> str:
     def try_merge(m):
         parts  = re.findall(r"\d+", m.group(0))
         merged = "".join(parts)
-        if len(merged) == 4 and merged in VEHICLE_MAP:
-            return merged
+        if merged in VEHICLE_MAP: return merged
         padded = merged.zfill(4)
-        if len(padded) == 4 and padded in VEHICLE_MAP:
-            return padded
+        if padded in VEHICLE_MAP: return padded
         return m.group(0)
 
-    result = re.sub(r"\b(\d{1,2}\s+){1,3}\d{1,2}\b", try_merge, result)
+    result = re.sub(r"\b(\d{1,2}\s+){1,4}\d{1,2}\b", try_merge, result)
+
+    def merge_singles(m):
+        digits = re.sub(r"\s+", "", m.group(0))
+        return digits if digits in VEHICLE_MAP else m.group(0)
+
+    result = re.sub(r"\b\d(\s\d){3}\b", merge_singles, result)
     return result
 
 
@@ -626,6 +632,17 @@ def liab_desc(op: str, raw: str, ai: Optional[str]) -> str:
     lo    = str(raw or "").lower()
     d     = str(ai or "").strip()
     today = datetime.now(KYIV_TZ).strftime("%d.%m.%y")
+
+    # Удаляем номер машины и лишние слова из описания
+    cleaned = lo
+    for cid in KNOWN_CAR_IDS:
+        cleaned = cleaned.replace(cid, "")
+    # Удаляем мусорные фразы которые добавляет Whisper
+    for junk in ["гривень", "гривен", "грн", "внеси", "внести", "расход",
+                 "витрата", "долг за долг", "штраф за штраф"]:
+        cleaned = cleaned.replace(junk, "")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
     if   "дтп"     in lo: base = "за ДТП"
     elif "телевиз" in lo: base = "за телевизор"
     elif "парков"  in lo: base = "за парковку"
@@ -859,8 +876,16 @@ def write_all(actions: List[dict], raw: str = "") -> str:
 # ════════════════════════════════════════════════════════════
 
 def find_car(text: str) -> Optional[str]:
+    # First try direct match
     for cid in sorted(KNOWN_CAR_IDS, key=len, reverse=True):
         if re.search(rf"(?<!\d){re.escape(cid)}(?!\d)", text):
+            return cid
+    # Then try merging digit groups: "04 18" -> "0418"
+    merged = re.sub(r"\b(\d{1,2}\s+){1,3}\d{1,2}\b",
+                    lambda m: "".join(re.findall(r"\d+", m.group(0))).zfill(4),
+                    text)
+    for cid in sorted(KNOWN_CAR_IDS, key=len, reverse=True):
+        if re.search(rf"(?<!\d){re.escape(cid)}(?!\d)", merged):
             return cid
     return None
 

@@ -100,6 +100,74 @@ _USD_CACHE: Dict[str,Any]   = {"rate":None,"day":None}
 # HELPERS
 # ════════════════════════════════════════════════════════════
 
+def words_to_numbers(text: str) -> str:
+    """
+    Конвертирует числительные в цифры для распознавания номеров авто голосом.
+    "ноль шесть шестьдесят пять" -> "0665"
+    "сорок семь пятнадцать" -> "4715"
+    """
+    ones = {
+        "ноль":"0","нуль":"0",
+        "один":"1","одна":"1",
+        "два":"2","две":"2",
+        "три":"3",
+        "четыре":"4","чотири":"4",
+        "пять":"5","п'ять":"5",
+        "шесть":"6","шість":"6",
+        "семь":"7","сім":"7",
+        "восемь":"8","вісім":"8",
+        "девять":"9","дев'ять":"9",
+    }
+    tens = {
+        "одиннадцать":"11","одинадцять":"11",
+        "двенадцать":"12","дванадцять":"12",
+        "тринадцать":"13","тринадцять":"13",
+        "четырнадцать":"14","чотирнадцять":"14",
+        "пятнадцать":"15","п'ятнадцять":"15",
+        "шестнадцать":"16","шістнадцять":"16",
+        "семнадцать":"17","сімнадцять":"17",
+        "восемнадцать":"18","вісімнадцять":"18",
+        "девятнадцать":"19","дев'ятнадцять":"19",
+        "десять":"10",
+        "двадцать":"20","двадцять":"20",
+        "тридцать":"30","тридцять":"30",
+        "сорок":"40",
+        "пятьдесят":"50","п'ятдесят":"50",
+        "шестьдесят":"60","шістдесят":"60",
+        "семьдесят":"70","сімдесят":"70",
+        "восемьдесят":"80","вісімдесят":"80",
+        "девяносто":"90","дев'яносто":"90",
+    }
+    compounds = {}
+    for t_word, t_val in tens.items():
+        if int(t_val) >= 20:
+            for o_word, o_val in ones.items():
+                compounds[f"{t_word} {o_word}"] = str(int(t_val) + int(o_val))
+
+    result = text.lower()
+
+    for phrase in sorted(compounds.keys(), key=lambda x: -len(x)):
+        result = result.replace(phrase, compounds[phrase])
+    for word in sorted(tens.keys(), key=lambda x: -len(x)):
+        result = re.sub(rf"\b{re.escape(word)}\b", tens[word], result)
+    for word in sorted(ones.keys(), key=lambda x: -len(x)):
+        result = re.sub(rf"\b{re.escape(word)}\b", ones[word], result)
+
+    def try_merge(m):
+        parts  = re.findall(r"\d+", m.group(0))
+        merged = "".join(parts)
+        if len(merged) == 4 and merged in VEHICLE_MAP:
+            return merged
+        padded = merged.zfill(4)
+        if len(padded) == 4 and padded in VEHICLE_MAP:
+            return padded
+        return m.group(0)
+
+    result = re.sub(r"\b(\d{1,2}\s+){1,3}\d{1,2}\b", try_merge, result)
+    return result
+
+
+
 def digs(v: str) -> str:
     return "".join(re.findall(r"\d+", str(v or "")))
 
@@ -755,16 +823,16 @@ def write_one(data: dict, raw: str = "") -> str:
         )
 
     if op_type in ("liability_minus", "liability_plus"):
-        # Находим ПОСЛЕДНЮЮ заполненную строку в P или Q, пишем после неё
+        # Берём строку сразу после последней заполненной в блоке K:Q
         all_v = ws.get_all_values()
-        last_p = 7
+        last_kq = 7
         for ri in range(8, len(all_v) + 1):
             row = all_v[ri - 1]
-            pv  = row[15] if len(row) > 15 else ""
-            qv  = row[16] if len(row) > 16 else ""
-            if str(pv).strip() or str(qv).strip():
-                last_p = ri
-        p_row = last_p + 1
+            # Смотрим колонки K(10), L(11), M(12), N(13), O(14), P(15), Q(16)
+            block = row[10:17] if len(row) > 10 else []
+            if any(str(c).strip() for c in block):
+                last_kq = ri
+        p_row = last_kq + 1
 
         sign = -abs(amount) if op_type == "liability_minus" else abs(amount)
         ld   = liab_desc(op_type, raw, desc)
@@ -1317,8 +1385,10 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Не вдалося розпізнати. Спробуй ще раз.")
             return
 
+        # Конвертируем числительные в цифры для распознавания номеров авто
+        text_converted = words_to_numbers(text)
         await update.message.reply_text(f"🎙 Розпізнано: {text}")
-        ctx.user_data["_voice_text"] = text
+        ctx.user_data["_voice_text"] = text_converted
         await _handle_msg_impl(update, ctx)
 
     except Exception as e:

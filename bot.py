@@ -755,17 +755,29 @@ def write_one(data: dict, raw: str = "") -> str:
         )
 
     if op_type in ("liability_minus", "liability_plus"):
-        r    = next_right_row(ws)
+        # Находим следующую пустую строку в колонке P
+        all_v = ws.get_all_values()
+        p_row = 8
+        for ri in range(8, len(all_v) + 1):
+            row = all_v[ri - 1] if ri <= len(all_v) else []
+            pv  = row[15] if len(row) > 15 else ""
+            if not str(pv).strip():
+                p_row = ri
+                break
+        else:
+            p_row = len(all_v) + 1
+
         sign = -abs(amount) if op_type == "liability_minus" else abs(amount)
         ld   = liab_desc(op_type, raw, desc)
-        ws.update(f"K{r}", [[date_val]])
-        apply_blue(ws, f"K{r}")
-        ws.update(f"P{r}:Q{r}", [[sign, ld]])
-        apply_blue(ws, f"P{r}:Q{r}")
+        # P = сумма (колонка 16), Q = описание (колонка 17)
+        ws.update(f"P{p_row}", [[sign]])
+        apply_blue(ws, f"P{p_row}")
+        ws.update(f"Q{p_row}", [[ld]])
+        apply_blue(ws, f"Q{p_row}")
         label = "Штраф/борг" if op_type == "liability_minus" else "Погашення"
         return (
             f"✅ {label} внесено!\n🚘 {plate}\n💵 {sign} грн\n"
-            f"📝 {ld}\n📍 {sh}, рядок {r}, P:Q"
+            f"📝 {ld}\n📍 {sh}, рядок {p_row}, P:Q"
         )
 
     return "❌ Невідомий тип операції"

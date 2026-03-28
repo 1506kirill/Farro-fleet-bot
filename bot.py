@@ -1441,6 +1441,18 @@ async def _handle_msg_impl(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ud   = ctx.user_data
 
     try:
+        # ── Команды-отчёты имеют приоритет над любым состоянием ожидания ──
+        if is_oil_cmd(text) or is_grm_cmd(text) or is_ins_cmd(text):
+            # Сбрасываем состояние ожидания
+            for k in ["w_odo","w_dup","w_anom","w_field","acts_odo","acts_dup","acts_anom","pending"]:
+                ud.pop(k, None)
+        single_ins = detect_ins_single(text)
+        car_cd     = detect_car_card(text)
+        month_cd   = det_month(text)
+        if single_ins or car_cd or month_cd:
+            for k in ["w_odo","w_dup","w_anom","w_field","acts_odo","acts_dup","acts_anom","pending"]:
+                ud.pop(k, None)
+
         # ── підтвердження дубля ──────────────────────────────
         if ud.get("w_dup"):
             acts = ud.get("acts_dup", [])

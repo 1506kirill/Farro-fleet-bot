@@ -1044,7 +1044,9 @@ def oil_report() -> str:
             continue
         co  = max(co, lo)
         rem = 10000 - (co - lo)
-        lines.append((rem, f"{km_icon(rem, 10000)} {cid} | {ld} | {lo:,} | {fmt_km(rem)} км"))
+        drv = fmt_driver(cid) if rem <= 1000 else ""
+        drv_line = f"\n   👤 {drv}" if drv else ""
+        lines.append((rem, f"{km_icon(rem, 10000)} {cid} | {ld} | {lo:,} | {fmt_km(rem)} км{drv_line}"))
     lines.sort(key=lambda x: x[0])
     return "\n".join(x[1] for x in lines) or "Даних немає"
 
@@ -1064,7 +1066,9 @@ def grm_report() -> str:
             continue
         co  = max(co, lo)
         rem = 50000 - (co - lo)
-        lines.append((rem, f"{km_icon(rem, 50000)} {cid} | {ld} | {lo:,} | {fmt_km(rem)} км"))
+        drv = fmt_driver(cid) if rem <= 1000 else ""
+        drv_line = f"\n   👤 {drv}" if drv else ""
+        lines.append((rem, f"{km_icon(rem, 50000)} {cid} | {ld} | {lo:,} | {fmt_km(rem)} км{drv_line}"))
     lines.sort(key=lambda x: x[0])
     return "\n".join(x[1] for x in lines) or "Даних немає"
 
@@ -1162,7 +1166,15 @@ def monthly_sum(car_id: str) -> str:
 # КАРТКА ВОДІЯ
 # ════════════════════════════════════════════════════════════
 
-def get_driver_info(car_id: str) -> Dict[str, str]:
+# Кеш водіїв (оновлюється раз на сесію)
+_DRIVERS_CACHE: Dict[str, Dict] = {}
+_DRIVERS_CACHE_TS = None
+
+def _load_drivers_cache():
+    global _DRIVERS_CACHE, _DRIVERS_CACHE_TS
+    now = datetime.now(KYIV_TZ)
+    if _DRIVERS_CACHE_TS and (now - _DRIVERS_CACHE_TS).total_seconds() < 300:
+        return
     try:
         scopes = ["https://spreadsheets.google.com/feeds",
                   "https://www.googleapis.com/auth/drive"]
@@ -1171,10 +1183,41 @@ def get_driver_info(car_id: str) -> Dict[str, str]:
         ws     = None
         for sheet in sp.worksheets():
             if DRIVERS_SHEET_NAME.lower() in sheet.title.lower():
-                ws = sheet
-                break
-        if not ws:
-            ws = sp.sheet1
+                ws = sheet; break
+        if not ws: ws = sp.sheet1
+        _DRIVERS_CACHE = {}
+        for row in ws.get_all_values()[1:]:
+            cell_a = str(row[0]).strip() if row else ""
+            if not cell_a: continue
+            # Extract 4-digit car ID from cell
+            import re as _re
+            nums = _re.findall(r'\d{4}', cell_a)
+            key  = nums[0] if nums else cell_a
+            name   = str(row[11]).strip() if len(row) > 11 else ""
+            phone1 = str(row[12]).strip() if len(row) > 12 else ""
+            phone2 = str(row[13]).strip() if len(row) > 13 else ""
+            _DRIVERS_CACHE[key] = {"name": name, "phone1": phone1, "phone2": phone2}
+        _DRIVERS_CACHE_TS = now
+    except Exception as e:
+        logger.error(f"_load_drivers_cache: {e}")
+
+
+def get_driver_info(car_id: str) -> Dict[str, str]:
+    _load_drivers_cache()
+    info = _DRIVERS_CACHE.get(car_id)
+    if info:
+        return info
+    # Fallback: direct lookup
+    try:
+        scopes = ["https://spreadsheets.google.com/feeds",
+                  "https://www.googleapis.com/auth/drive"]
+        client = gspread.authorize(_make_creds(scopes))
+        sp     = client.open_by_key(DRIVERS_SPREADSHEET_ID)
+        ws     = None
+        for sheet in sp.worksheets():
+            if DRIVERS_SHEET_NAME.lower() in sheet.title.lower():
+                ws = sheet; break
+        if not ws: ws = sp.sheet1
         for row in ws.get_all_values()[1:]:
             cell_a = str(row[0]).strip() if row else ""
             if car_id in cell_a or cell_a == car_id:
@@ -1184,7 +1227,22 @@ def get_driver_info(car_id: str) -> Dict[str, str]:
                 return {"name": name, "phone1": phone1, "phone2": phone2}
     except Exception as e:
         logger.error(f"get_driver_info: {e}")
-    return {"name": "—", "phone1": "—", "phone2": ""}
+    return {"name": "", "phone1": "", "phone2": ""}
+
+
+def fmt_driver(car_id: str) -> str:
+    """Форматує рядок з ім'ям та телефоном водія"""
+    d = get_driver_info(car_id)
+    name   = d.get("name", "").strip()
+    phone1 = d.get("phone1", "").strip()
+    phone2 = d.get("phone2", "").strip()
+    if not name and not phone1:
+        return "Немає водія"
+    phones = " / ".join(p for p in [phone1, phone2] if p)
+    parts  = []
+    if name:   parts.append(name)
+    if phones: parts.append(phones)
+    return " | ".join(parts)
 
 
 def car_card(car_id: str) -> str:
@@ -1292,7 +1350,8 @@ async def notify(ctx: ContextTypes.DEFAULT_TYPE):
             if go and co:
                 rem = 50000 - (max(co, go) - go)
                 if rem <= 1000:
-                    grm_.append((rem, f"  {km_icon(rem, 50000)} {cid} — {fmt_km(rem)} км до ГРМ"))
+                    drv = fmt_driver(cid)
+                grm_.append((rem, f"  {km_icon(rem, 50000)} {cid} — {fmt_km(rem)} км до ГРМ\n    👤 {drv}"))
 
         end_d, company = find_insurance(rows)
         if end_d:

@@ -699,7 +699,7 @@ def call_claude(p: str) -> dict:
     if not claude_client:
         raise RuntimeError("CLAUDE_API_KEY не встановлено")
     r = claude_client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-haiku-4-5-20251001",
         max_tokens=700,
         messages=[{"role": "user", "content": p}],
     )

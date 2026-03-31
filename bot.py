@@ -1763,8 +1763,12 @@ def main():
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
-    app.job_queue.run_daily(notify, time=time(9,  15, tzinfo=KYIV_TZ))
-    app.job_queue.run_daily(notify, time=time(16,  0, tzinfo=KYIV_TZ))
+    # Нагадування тiльки в буднi днi (Пн-Пт) о 09:15
+    app.job_queue.run_daily(
+        notify,
+        time=time(9, 15, tzinfo=KYIV_TZ),
+        days=(0, 1, 2, 3, 4),  # 0=Пн, 1=Вт, 2=Ср, 3=Чт, 4=Пт
+    )
     logger.info("Bot started!")
     app.run_polling(drop_pending_updates=True)
 

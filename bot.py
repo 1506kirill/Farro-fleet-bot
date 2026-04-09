@@ -112,6 +112,60 @@ def get_sheet():
     return client.open_by_key(SPREADSHEET_ID)
 
 
+_DRIVERS_CACHE: Dict[str, Dict] = {}
+_DRIVERS_CACHE_TS: Optional[datetime] = None
+
+
+def _load_drivers_cache() -> None:
+    global _DRIVERS_CACHE, _DRIVERS_CACHE_TS
+    now = datetime.now(KYIV_TZ)
+    if _DRIVERS_CACHE_TS and (now - _DRIVERS_CACHE_TS).total_seconds() < 300:
+        return
+    try:
+        creds_dict = json.loads(GOOGLE_CREDS)
+        scopes     = ["https://spreadsheets.google.com/feeds",
+                      "https://www.googleapis.com/auth/drive"]
+        creds      = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        client     = gspread.authorize(creds)
+        sp         = client.open_by_key(DRIVERS_SPREADSHEET_ID)
+        ws         = None
+        for sheet in sp.worksheets():
+            if "ТО" in sheet.title or "грм" in sheet.title.lower():
+                ws = sheet
+                break
+        if not ws:
+            ws = sp.sheet1
+        cache = {}
+        for row in ws.get_all_values()[1:]:
+            if not row or not str(row[0]).strip():
+                continue
+            key    = re.sub(r"[^0-9]", "", str(row[0]).strip())
+            name   = str(row[11]).strip() if len(row) > 11 else ""
+            phone1 = str(row[12]).strip() if len(row) > 12 else ""
+            phone2 = str(row[13]).strip() if len(row) > 13 else ""
+            if key:
+                cache[key] = {"name": name, "phone1": phone1, "phone2": phone2}
+        _DRIVERS_CACHE    = cache
+        _DRIVERS_CACHE_TS = now
+    except Exception as e:
+        logger.error("_load_drivers_cache: %s", e)
+
+
+def fmt_driver(car_id: str) -> str:
+    _load_drivers_cache()
+    info   = _DRIVERS_CACHE.get(car_id, {})
+    name   = info.get("name", "").strip()
+    phone1 = info.get("phone1", "").strip()
+    phone2 = info.get("phone2", "").strip()
+    if not name and not phone1:
+        return "Немає водiя"
+    phones = " / ".join(p for p in [phone1, phone2] if p)
+    parts  = []
+    if name:   parts.append(name)
+    if phones: parts.append(phones)
+    return " | ".join(parts)
+
+
 def get_matching_worksheet(spreadsheet, car_id: str):
     full_plate = VEHICLE_MAP.get(car_id, "")
     for ws in spreadsheet.worksheets():
@@ -164,11 +218,25 @@ def normalize_date_short(date_str: Optional[str]) -> str:
     return datetime.now(KYIV_TZ).strftime("%d.%m.%y")
 
 
-def parse_short_date(date_str: Optional[str]) -> Optional[date]:
+def parse_short_date(date_str) -> Optional[date]:
     if not date_str:
         return None
+    # Handle datetime/date objects from openpyxl
+    if hasattr(date_str, 'date'):
+        return date_str.date()
+    if isinstance(date_str, date):
+        return date_str
     s = str(date_str).strip()
-    for fmt in ("%d.%m.%Y", "%d.%m.%y", "%d-%m-%Y", "%d-%m-%y"):
+    if not s or s in ('None', ''):
+        return None
+    # Try ISO format first (from openpyxl string conversion)
+    if 'T' in s or (len(s) > 8 and '-' in s[:8]):
+        try:
+            return datetime.fromisoformat(s.split(' ')[0].split('T')[0]).date()
+        except Exception:
+            pass
+    for fmt in ("%d.%m.%Y", "%d.%m.%y", "%d-%m-%Y", "%d-%m-%y",
+                "%Y-%m-%d", "%Y.%m.%d"):
         try:
             return datetime.strptime(s, fmt).date()
         except ValueError:
@@ -608,7 +676,11 @@ def build_oil_report() -> str:
             current_odo = last_odo
         remaining = 10000 - (current_odo - last_odo)
         icon = get_color_icon(remaining, 10000)
-        items.append((remaining, f"{icon} {car_id} | {last_date} | {last_odo} | {format_km(remaining)} км"))
+        line = f"{icon} {car_id} | {last_date} | {last_odo} | {format_km(remaining)} км"
+        if remaining <= 1000:
+            drv = fmt_driver(car_id)
+            line += f"\n   👤 {drv}"
+        items.append((remaining, line))
     items.sort(key=lambda x: x[0])
     return "\n".join(line for _, line in items)
 
@@ -634,7 +706,11 @@ def build_grm_report() -> str:
             current_odo = last_odo
         remaining = 50000 - (current_odo - last_odo)
         icon = get_color_icon(remaining, 50000)
-        items.append((remaining, f"{icon} {car_id} | {last_date} | {last_odo} | {format_km(remaining)} км"))
+        line = f"{icon} {car_id} | {last_date} | {last_odo} | {format_km(remaining)} км"
+        if remaining <= 1000:
+            drv = fmt_driver(car_id)
+            line += f"\n   👤 {drv}"
+        items.append((remaining, line))
     items.sort(key=lambda x: x[0])
     return "\n".join(line for _, line in items)
 
@@ -706,10 +782,12 @@ async def check_service_and_insurance_notifications(context: ContextTypes.DEFAUL
             remaining = 10000 - (max(current_odo, oil_odo) - oil_odo)
             if remaining <= 1000:
                 icon = "🔴" if remaining <= 0 else "🟠"
+                drv = fmt_driver(car_id)
+                drv_line = f"\n    👤 {drv}"
                 if remaining < 0:
-                    alert_items.append((remaining, f"{icon} {car_id} — масло прострочено на {format_km(abs(remaining))} км"))
+                    alert_items.append((remaining, f"{icon} {car_id} — масло прострочено на {format_km(abs(remaining))} км{drv_line}"))
                 else:
-                    alert_items.append((remaining, f"{icon} {car_id} — масло через {format_km(remaining)} км"))
+                    alert_items.append((remaining, f"{icon} {car_id} — масло через {format_km(remaining)} км{drv_line}"))
 
         if car_id not in SKIP_GRM:
             grm_date, grm_odo = find_last_service(rows, "grm")
@@ -717,10 +795,12 @@ async def check_service_and_insurance_notifications(context: ContextTypes.DEFAUL
                 remaining = 50000 - (max(current_odo, grm_odo) - grm_odo)
                 if remaining <= 1000:
                     icon = "🔴" if remaining <= 0 else "🟠"
+                    drv = fmt_driver(car_id)
+                    drv_line = f"\n    👤 {drv}"
                     if remaining < 0:
-                        alert_items.append((remaining, f"{icon} {car_id} — ГРМ прострочено на {format_km(abs(remaining))} км"))
+                        alert_items.append((remaining, f"{icon} {car_id} — ГРМ прострочено на {format_km(abs(remaining))} км{drv_line}"))
                     else:
-                        alert_items.append((remaining, f"{icon} {car_id} — ГРМ через {format_km(remaining)} км"))
+                        alert_items.append((remaining, f"{icon} {car_id} — ГРМ через {format_km(remaining)} км{drv_line}"))
 
         best: Optional[Tuple[date, str]] = None
         for row in rows[7:]:

@@ -779,8 +779,9 @@ def build_insurance_report() -> str:
         end_date, company = best
         days_left = (end_date - today).days
         icon = insurance_days_icon(days_left)
-        lines.append(f"{icon} {car_id} | {end_date.strftime('%d.%m.%y')} | {company}")
-    return "\n".join(lines)
+        lines.append((days_left, f"{icon} {car_id} | {end_date.strftime('%d.%m.%y')} | {company}"))
+    lines.sort(key=lambda x: x[0])
+    return "\n".join(line for _, line in lines)
 
 
 async def check_service_and_insurance_notifications(context: ContextTypes.DEFAULT_TYPE):

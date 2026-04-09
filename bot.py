@@ -472,36 +472,25 @@ def heuristic_multi_parse(text: str) -> Optional[List[dict]]:
 # ===== Reports: current odometer and service blocks =====
 
 def get_current_odometer_from_rows(rows: List[List[str]]) -> Optional[int]:
-    latest_expense: Optional[Tuple[date, int]] = None
-    latest_income: Optional[Tuple[date, int]] = None
+    # Беремо максимальний одометр з обох стовпців F та L — без прив'язки до дати.
+    # Це коректно тому що одометр тiльки зростає.
+    max_odo: Optional[int] = None
 
     for r in rows[7:]:
+        # Колонка F (iндекс 5) — витрати
         if len(r) > 5:
-            d = parse_short_date(r[4] if len(r) > 4 else None)
-            odo = parse_num(r[5] if len(r) > 5 else None)
-            if d and odo is not None:
-                if latest_expense is None or d > latest_expense[0] or (d == latest_expense[0] and odo > latest_expense[1]):
-                    latest_expense = (d, odo)
-
+            odo = parse_num(r[5])
+            if odo is not None and odo > 1000:
+                if max_odo is None or odo > max_odo:
+                    max_odo = odo
+        # Колонка L (iндекс 11) — доходи
         if len(r) > 11:
-            d = parse_short_date(r[10] if len(r) > 10 else None)
-            odo = parse_num(r[11] if len(r) > 11 else None)
-            if d and odo is not None:
-                if latest_income is None or d > latest_income[0] or (d == latest_income[0] and odo > latest_income[1]):
-                    latest_income = (d, odo)
+            odo = parse_num(r[11])
+            if odo is not None and odo > 1000:
+                if max_odo is None or odo > max_odo:
+                    max_odo = odo
 
-    if latest_expense and latest_income:
-        if latest_expense[0] > latest_income[0]:
-            return latest_expense[1]
-        if latest_income[0] > latest_expense[0]:
-            return latest_income[1]
-        return max(latest_expense[1], latest_income[1])
-
-    if latest_expense:
-        return latest_expense[1]
-    if latest_income:
-        return latest_income[1]
-    return None
+    return max_odo
 
 
 def split_expense_blocks(rows: List[List[str]]) -> List[List[Dict[str, Any]]]:
@@ -716,20 +705,22 @@ async def check_service_and_insurance_notifications(context: ContextTypes.DEFAUL
         if oil_odo is not None and current_odo is not None:
             remaining = 10000 - (max(current_odo, oil_odo) - oil_odo)
             if remaining <= 1000:
+                icon = "🔴" if remaining <= 0 else "🟠"
                 if remaining < 0:
-                    alert_items.append((remaining, f"🚗 {car_id} — масло прострочено на {format_km(abs(remaining))} км"))
+                    alert_items.append((remaining, f"{icon} {car_id} — масло прострочено на {format_km(abs(remaining))} км"))
                 else:
-                    alert_items.append((remaining, f"🚗 {car_id} — масло через {format_km(remaining)} км"))
+                    alert_items.append((remaining, f"{icon} {car_id} — масло через {format_km(remaining)} км"))
 
         if car_id not in SKIP_GRM:
             grm_date, grm_odo = find_last_service(rows, "grm")
             if grm_odo is not None and current_odo is not None:
                 remaining = 50000 - (max(current_odo, grm_odo) - grm_odo)
                 if remaining <= 1000:
+                    icon = "🔴" if remaining <= 0 else "🟠"
                     if remaining < 0:
-                        alert_items.append((remaining, f"🚗 {car_id} — ГРМ прострочено на {format_km(abs(remaining))} км"))
+                        alert_items.append((remaining, f"{icon} {car_id} — ГРМ прострочено на {format_km(abs(remaining))} км"))
                     else:
-                        alert_items.append((remaining, f"🚗 {car_id} — ГРМ через {format_km(remaining)} км"))
+                        alert_items.append((remaining, f"{icon} {car_id} — ГРМ через {format_km(remaining)} км"))
 
         best: Optional[Tuple[date, str]] = None
         for row in rows[7:]:

@@ -64,6 +64,25 @@ REPORT_CACHE: Dict[str, Any] = {"snapshot": None, "time": None}
 REPORT_CACHE_TTL = 180
 
 
+
+def parse_insurance_a4(text) -> tuple:
+    """Парсить рядок з A4: 'Страховка до 24.11.26 Євроiнс' -> (date, company)"""
+    if not text:
+        return None, None
+    s = str(text).strip()
+    m = re.search(r'(\d{2}\.\d{2}\.\d{2,4})', s)
+    if not m:
+        return None, None
+    date_str = m.group(1)
+    try:
+        fmt = '%d.%m.%y' if len(date_str) == 8 else '%d.%m.%Y'
+        d   = datetime.strptime(date_str, fmt).date()
+    except Exception:
+        return None, None
+    company = s[m.end():].strip() or 'Страховка'
+    return d, company
+
+
 def extract_digits(value: str) -> str:
     return "".join(re.findall(r"\d+", str(value or "")))
 
@@ -740,14 +759,21 @@ def build_insurance_report() -> str:
         if not rows:
             continue
 
+        # Спочатку шукаємо в A4 (рядок 4, iндекс 3)
         best: Optional[Tuple[date, str]] = None
-        for row in rows[7:]:
-            if len(row) >= INSURANCE_COMPANY_COL:
-                d = parse_short_date(row[INSURANCE_DATE_COL - 1])
-                company = str(row[INSURANCE_COMPANY_COL - 1]).strip()
-                if d and company:
-                    if best is None or d > best[0]:
-                        best = (d, company)
+        if len(rows) > 3 and rows[3] and rows[3][0]:
+            d, company = parse_insurance_a4(rows[3][0])
+            if d:
+                best = (d, company)
+        # Якщо в A4 немає — шукаємо в колонках R/S
+        if not best:
+            for row in rows[7:]:
+                if len(row) >= INSURANCE_COMPANY_COL:
+                    d = parse_short_date(row[INSURANCE_DATE_COL - 1])
+                    company = str(row[INSURANCE_COMPANY_COL - 1]).strip()
+                    if d and company:
+                        if best is None or d > best[0]:
+                            best = (d, company)
         if not best:
             continue
         end_date, company = best
@@ -802,14 +828,20 @@ async def check_service_and_insurance_notifications(context: ContextTypes.DEFAUL
                     else:
                         alert_items.append((remaining, f"{icon} {car_id} — ГРМ через {format_km(remaining)} км{drv_line}"))
 
+        # Спочатку шукаємо в A4
         best: Optional[Tuple[date, str]] = None
-        for row in rows[7:]:
-            if len(row) >= INSURANCE_COMPANY_COL:
-                d = parse_short_date(row[INSURANCE_DATE_COL - 1])
-                company = str(row[INSURANCE_COMPANY_COL - 1]).strip()
-                if d and company:
-                    if best is None or d > best[0]:
-                        best = (d, company)
+        if len(rows) > 3 and rows[3] and rows[3][0]:
+            d, company = parse_insurance_a4(rows[3][0])
+            if d:
+                best = (d, company)
+        if not best:
+            for row in rows[7:]:
+                if len(row) >= INSURANCE_COMPANY_COL:
+                    d = parse_short_date(row[INSURANCE_DATE_COL - 1])
+                    company = str(row[INSURANCE_COMPANY_COL - 1]).strip()
+                    if d and company:
+                        if best is None or d > best[0]:
+                            best = (d, company)
         if best:
             end_date, company = best
             days_left = (end_date - today).days

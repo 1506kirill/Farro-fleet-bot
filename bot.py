@@ -787,7 +787,9 @@ def build_insurance_report() -> str:
 async def check_service_and_insurance_notifications(context: ContextTypes.DEFAULT_TYPE):
     now_kyiv = datetime.now(KYIV_TZ)
     if now_kyiv.weekday() >= 5:
+        logger.info("Notify skipped: weekend")
         return
+    logger.info("Running daily notification check...")
 
     snapshot = get_data_snapshot(force_refresh=True)
     today = now_kyiv.date()
@@ -852,14 +854,18 @@ async def check_service_and_insurance_notifications(context: ContextTypes.DEFAUL
                 else:
                     alert_items.append((days_left, f"🚗 {car_id} — страховка через {days_left} дн. ({company})"))
 
+    logger.info("Notify: %d alert items found", len(alert_items))
     if alert_items:
         alert_items.sort(key=lambda x: x[0])
         text = "⚠️ Стан регламентiв на сьогоднi:\n\n" + "\n".join(msg for _, msg in alert_items)
         for user_id in ALLOWED_USERS:
             try:
                 await context.bot.send_message(chat_id=user_id, text=text)
+                logger.info("Notification sent to %s", user_id)
             except Exception as e:
-                logger.error(f"Notification send error: {e}")
+                logger.error("Notification send error: %s", e)
+    else:
+        logger.info("Notify: no alerts today, message not sent")
 
 
 # ===== USD rate =====
@@ -1535,6 +1541,7 @@ def main():
     app.job_queue.run_daily(
         check_service_and_insurance_notifications,
         time=time(9, 15, tzinfo=KYIV_TZ),
+        days=(0, 1, 2, 3, 4),  # тiльки Пн-Пт
         name="weekday_morning_regulations"
     )
     logger.info("Bot started!")

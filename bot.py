@@ -559,25 +559,36 @@ def heuristic_multi_parse(text: str) -> Optional[List[dict]]:
 # ===== Reports: current odometer and service blocks =====
 
 def get_current_odometer_from_rows(rows: List[List[str]]) -> Optional[int]:
-    # Беремо максимальний одометр з обох стовпців F та L — без прив'язки до дати.
-    # Це коректно тому що одометр тiльки зростає.
-    max_odo: Optional[int] = None
+    # Беремо одометр з останньої за ДАТОЮ записi.
+    # Колонка F (витрати) та L (доходи) порiвнюємо по датi — перемагає пiзнiша.
+    latest_f: Optional[Tuple[date, int]] = None
+    latest_l: Optional[Tuple[date, int]] = None
 
     for r in rows[7:]:
-        # Колонка F (iндекс 5) — витрати
         if len(r) > 5:
+            d   = parse_short_date(r[4] if len(r) > 4 else None)
             odo = parse_num(r[5])
-            if odo is not None and odo > 1000:
-                if max_odo is None or odo > max_odo:
-                    max_odo = odo
-        # Колонка L (iндекс 11) — доходи
+            if d and odo is not None and odo > 1000:
+                if latest_f is None or d > latest_f[0] or (d == latest_f[0] and odo > latest_f[1]):
+                    latest_f = (d, odo)
         if len(r) > 11:
+            d   = parse_short_date(r[10] if len(r) > 10 else None)
             odo = parse_num(r[11])
-            if odo is not None and odo > 1000:
-                if max_odo is None or odo > max_odo:
-                    max_odo = odo
+            if d and odo is not None and odo > 1000:
+                if latest_l is None or d > latest_l[0] or (d == latest_l[0] and odo > latest_l[1]):
+                    latest_l = (d, odo)
 
-    return max_odo
+    if latest_f and latest_l:
+        if latest_f[0] > latest_l[0]:
+            return latest_f[1]
+        if latest_l[0] > latest_f[0]:
+            return latest_l[1]
+        return max(latest_f[1], latest_l[1])
+    if latest_f:
+        return latest_f[1]
+    if latest_l:
+        return latest_l[1]
+    return None
 
 
 def split_expense_blocks(rows: List[List[str]]) -> List[List[Dict[str, Any]]]:

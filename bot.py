@@ -61,7 +61,7 @@ INSURANCE_DATE_COL = 18  # R (1-based)
 INSURANCE_COMPANY_COL = 19  # S (1-based)
 
 REPORT_CACHE: Dict[str, Any] = {"snapshot": None, "time": None}
-REPORT_CACHE_TTL = 180
+REPORT_CACHE_TTL = 600  # 10 хвилин — зменшує навантаження на Google Sheets API
 
 
 
@@ -120,15 +120,36 @@ def mark_cell_yellow(ws, cell_range: str) -> None:
 
 # ===== Google Sheets =====
 
+_gspread_client = None
+_gspread_client_ts = None
+
+
 def get_sheet():
-    creds_dict = json.loads(GOOGLE_CREDS)
-    scopes = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-    client = gspread.authorize(creds)
-    return client.open_by_key(SPREADSHEET_ID)
+    global _gspread_client, _gspread_client_ts
+    import time as _time
+    now = datetime.now(KYIV_TZ)
+    # Кешуємо gspread клiєнт на 30 хвилин
+    if _gspread_client is None or _gspread_client_ts is None or             (now - _gspread_client_ts).total_seconds() > 1800:
+        creds_dict = json.loads(GOOGLE_CREDS)
+        scopes = [
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        _gspread_client    = gspread.authorize(creds)
+        _gspread_client_ts = now
+
+    # Retry з паузою при 429
+    for attempt in range(3):
+        try:
+            return _gspread_client.open_by_key(SPREADSHEET_ID)
+        except gspread.exceptions.APIError as e:
+            if '429' in str(e) and attempt < 2:
+                wait = 10 * (attempt + 1)
+                logger.warning("Google Sheets 429, чекаємо %ds (спроба %d)", wait, attempt+1)
+                _time.sleep(wait)
+            else:
+                raise
 
 
 _DRIVERS_CACHE: Dict[str, Dict] = {}
@@ -138,15 +159,25 @@ _DRIVERS_CACHE_TS: Optional[datetime] = None
 def _load_drivers_cache() -> None:
     global _DRIVERS_CACHE, _DRIVERS_CACHE_TS
     now = datetime.now(KYIV_TZ)
-    if _DRIVERS_CACHE_TS and (now - _DRIVERS_CACHE_TS).total_seconds() < 300:
+    if _DRIVERS_CACHE_TS and (now - _DRIVERS_CACHE_TS).total_seconds() < 900:  # 15 хв
         return
     try:
         creds_dict = json.loads(GOOGLE_CREDS)
         scopes     = ["https://spreadsheets.google.com/feeds",
                       "https://www.googleapis.com/auth/drive"]
         creds      = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-        client     = gspread.authorize(creds)
-        sp         = client.open_by_key(DRIVERS_SPREADSHEET_ID)
+        client = gspread.authorize(creds)
+        # Retry при 429
+        import time as _time
+        for _attempt in range(3):
+            try:
+                sp = client.open_by_key(DRIVERS_SPREADSHEET_ID)
+                break
+            except gspread.exceptions.APIError as _e:
+                if '429' in str(_e) and _attempt < 2:
+                    _time.sleep(10 * (_attempt + 1))
+                else:
+                    raise
         ws         = None
         for sheet in sp.worksheets():
             if "ТО" in sheet.title or "грм" in sheet.title.lower():

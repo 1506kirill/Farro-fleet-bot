@@ -620,13 +620,23 @@ def split_expense_blocks(rows: List[List[str]]) -> List[List[Dict[str, Any]]]:
 def score_oil_block(block: List[Dict[str, Any]]) -> int:
     text = " | ".join(x["desc"] for x in block)
     score = 0
+    # Сильнi маркери (однозначно замiна масла)
     if "масло в двигатель" in text:
         score += 10
     if "моторное масло" in text:
         score += 8
     if "замена масла" in text:
         score += 8
+    if "замiна масла" in text:
+        score += 8
+    if "масло в двигун" in text:
+        score += 8
+    if "моторне масло" in text:
+        score += 8
+    # Слабкi маркери
     if "масляный фильтр" in text:
+        score += 4
+    if "масляний фiльтр" in text:
         score += 4
     if "масло" in text:
         score += 2
@@ -658,7 +668,7 @@ def find_last_service(rows: List[List[str]], mode: str) -> Tuple[Optional[str], 
 
     scorer = score_oil_block if mode == "oil" else score_grm_block
     for block in reversed(blocks):
-        if scorer(block) >= (10 if mode == "oil" else 8):
+        if scorer(block) >= (8 if mode == "oil" else 8):
             return block[0]["date"], block[0]["odo"]
     return None, None
 

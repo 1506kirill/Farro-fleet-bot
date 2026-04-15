@@ -1480,6 +1480,56 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(monthly_summary(car_id_for_summary))
             return
 
+        # Якщо повiдомлення — тiльки номер машини (4 цифри) — показуємо картку авто
+        text_stripped = text.strip()
+        if re.match(r"^\d{4}$", text_stripped) and text_stripped in KNOWN_CAR_IDS:
+            car_id = text_stripped
+            snapshot = get_data_snapshot()
+            rows = next((v for t, v in snapshot.items()
+                         if car_id in t or VEHICLE_MAP.get(car_id, "") in t), None)
+            lines = [f"🚗 Машина {car_id} ({VEHICLE_MAP.get(car_id, '')})\n"]
+            if rows:
+                cur_odo = get_current_odometer_from_rows(rows)
+                if cur_odo:
+                    lines.append(f"📍 Поточний одометр: {format_km(cur_odo)} км")
+                # Масло
+                _, oil_odo = find_last_service(rows, "oil")
+                if oil_odo and cur_odo:
+                    oil_rem = 10000 - (max(cur_odo, oil_odo) - oil_odo)
+                    oil_icon = get_color_icon(oil_rem, 10000)
+                    lines.append(f"{oil_icon} Масло: {format_km(oil_rem)} км до регламенту")
+                # ГРМ
+                if car_id not in SKIP_GRM:
+                    _, grm_odo = find_last_service(rows, "grm")
+                    if grm_odo and cur_odo:
+                        grm_rem = 50000 - (max(cur_odo, grm_odo) - grm_odo)
+                        grm_icon = get_color_icon(grm_rem, 50000)
+                        lines.append(f"{grm_icon} ГРМ: {format_km(grm_rem)} км до регламенту")
+                # Страховка
+                today_d = datetime.now(KYIV_TZ).date()
+                best = None
+                if len(rows) > 3 and rows[3] and rows[3][0]:
+                    d, company = parse_insurance_a4(rows[3][0])
+                    if d:
+                        best = (d, company)
+                if not best:
+                    for row in rows[7:]:
+                        if len(row) >= INSURANCE_COMPANY_COL:
+                            d = parse_short_date(row[INSURANCE_DATE_COL - 1])
+                            company = str(row[INSURANCE_COMPANY_COL - 1]).strip()
+                            if d and company:
+                                if best is None or d > best[0]:
+                                    best = (d, company)
+                if best:
+                    days_left = (best[0] - today_d).days
+                    ins_icon = insurance_days_icon(days_left)
+                    lines.append(f"{ins_icon} Страховка: {best[0].strftime('%d.%m.%y')} ({best[1]})")
+            # Місячна статистика
+            lines.append("")
+            lines.append(monthly_summary(car_id))
+            await update.message.reply_text("\n".join(lines))
+            return
+
         await update.message.reply_text("⏳ Обробляю...")
 
         heuristic_actions = heuristic_multi_parse(text)

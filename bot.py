@@ -842,7 +842,21 @@ async def check_service_and_insurance_notifications(context: ContextTypes.DEFAUL
         logger.info("Notify skipped: weekend")
         return
     logger.info("Running daily notification check...")
+    try:
+        await _run_notifications(context)
+    except Exception as e:
+        logger.error("Notify top-level error: %s", e, exc_info=True)
+        for user_id in ALLOWED_USERS:
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"⚠️ Помилка при формуваннi регламентiв: {e}")
+            except Exception:
+                pass
 
+
+async def _run_notifications(context: ContextTypes.DEFAULT_TYPE):
+    now_kyiv = datetime.now(KYIV_TZ)
     snapshot = get_data_snapshot(force_refresh=True)
     today = now_kyiv.date()
     alert_items: List[Tuple[int, str]] = []

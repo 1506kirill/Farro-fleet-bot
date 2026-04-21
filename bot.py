@@ -186,7 +186,9 @@ def _load_drivers_cache() -> None:
         if not ws:
             ws = sp.sheet1
         cache = {}
-        for row in ws.get_all_values()[1:]:
+        all_rows = ws.get_all_values()
+        logger.info("Drivers sheet: %d rows, first row: %s", len(all_rows), all_rows[0][:3] if all_rows else [])
+        for row in all_rows[2:]:  # пропускаємо 2 рядки заголовкiв
             if not row or not str(row[0]).strip():
                 continue
             key    = re.sub(r"[^0-9]", "", str(row[0]).strip())
@@ -195,6 +197,9 @@ def _load_drivers_cache() -> None:
             phone2 = str(row[13]).strip() if len(row) > 13 else ""
             if key:
                 cache[key] = {"name": name, "phone1": phone1, "phone2": phone2}
+                if name or phone1:
+                    logger.debug("Driver: key=%s name=%s phone=%s", key, name, phone1)
+        logger.info("Drivers cache loaded: %d entries", len(cache))
         _DRIVERS_CACHE    = cache
         _DRIVERS_CACHE_TS = now
     except Exception as e:

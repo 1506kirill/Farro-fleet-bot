@@ -61,26 +61,96 @@ INSURANCE_DATE_COL = 18  # R (1-based)
 INSURANCE_COMPANY_COL = 19  # S (1-based)
 
 REPORT_CACHE: Dict[str, Any] = {"snapshot": None, "time": None}
-REPORT_CACHE_TTL = 600  # 10 хвилин — зменшує навантаження на Google Sheets API
+REPORT_CACHE_TTL = 600
 
+
+
+DRIVERS_SPREADSHEET_ID = os.environ.get("DRIVERS_SPREADSHEET_ID", "1WzJyXkrI6kUwg7vIRbssNwP5LM9-1-jK3b4SWSOHUYU")
+DRIVERS_SHEET_NAME = "ТО і ГРМ"
+
+_gspread_client = None
+_gspread_client_ts = None
+
+_DRIVERS_CACHE: Dict[str, Dict] = {}
+_DRIVERS_CACHE_TS: Optional[datetime] = None
 
 
 def parse_insurance_a4(text) -> tuple:
-    """Парсить рядок з A4: 'Страховка до 24.11.26 Євроiнс' -> (date, company)"""
     if not text:
         return None, None
     s = str(text).strip()
-    m = re.search(r'(\d{2}\.\d{2}\.\d{2,4})', s)
+    m = re.search(r"(\d{2}\.\d{2}\.\d{2,4})", s)
     if not m:
         return None, None
     date_str = m.group(1)
     try:
-        fmt = '%d.%m.%y' if len(date_str) == 8 else '%d.%m.%Y'
-        d   = datetime.strptime(date_str, fmt).date()
+        fmt = "%d.%m.%y" if len(date_str) == 8 else "%d.%m.%Y"
+        d = datetime.strptime(date_str, fmt).date()
     except Exception:
         return None, None
-    company = s[m.end():].strip() or 'Страховка'
+    company = s[m.end():].strip() or "Страховка"
     return d, company
+
+
+def _load_drivers_cache() -> None:
+    global _DRIVERS_CACHE, _DRIVERS_CACHE_TS
+    now = datetime.now(KYIV_TZ)
+    if _DRIVERS_CACHE_TS and (now - _DRIVERS_CACHE_TS).total_seconds() < 300:
+        return
+    try:
+        import time as _time
+        creds_dict = json.loads(GOOGLE_CREDS)
+        scopes = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        client = gspread.authorize(creds)
+        for _attempt in range(3):
+            try:
+                sp = client.open_by_key(DRIVERS_SPREADSHEET_ID)
+                break
+            except gspread.exceptions.APIError as _e:
+                if "429" in str(_e) and _attempt < 2:
+                    _time.sleep(10 * (_attempt + 1))
+                else:
+                    raise
+        ws = None
+        for sheet in sp.worksheets():
+            if "ТО" in sheet.title or "грм" in sheet.title.lower():
+                ws = sheet
+                break
+        if not ws:
+            ws = sp.sheet1
+        cache = {}
+        all_rows = ws.get_all_values()
+        logger.info("Drivers sheet: %d rows", len(all_rows))
+        for row in all_rows[2:]:
+            if not row or not str(row[0]).strip():
+                continue
+            key = re.sub(r"[^0-9]", "", str(row[0]).strip())
+            name = str(row[11]).strip() if len(row) > 11 else ""
+            phone1 = str(row[12]).strip() if len(row) > 12 else ""
+            phone2 = str(row[13]).strip() if len(row) > 13 else ""
+            if key:
+                cache[key] = {"name": name, "phone1": phone1, "phone2": phone2}
+        _DRIVERS_CACHE = cache
+        _DRIVERS_CACHE_TS = now
+        logger.info("Drivers cache: %d entries", len(cache))
+    except Exception as e:
+        logger.error("_load_drivers_cache: %s", e)
+
+
+def fmt_driver(car_id: str) -> str:
+    _load_drivers_cache()
+    info = _DRIVERS_CACHE.get(car_id, {})
+    name = info.get("name", "").strip()
+    phone1 = info.get("phone1", "").strip()
+    phone2 = info.get("phone2", "").strip()
+    if not name and not phone1:
+        return "Немає водiя"
+    phones = " / ".join(p for p in [phone1, phone2] if p)
+    parts = []
+    if name: parts.append(name)
+    if phones: parts.append(phones)
+    return " | ".join(parts)
 
 
 def extract_digits(value: str) -> str:
@@ -120,105 +190,24 @@ def mark_cell_yellow(ws, cell_range: str) -> None:
 
 # ===== Google Sheets =====
 
-_gspread_client = None
-_gspread_client_ts = None
-
-
 def get_sheet():
     global _gspread_client, _gspread_client_ts
     import time as _time
     now = datetime.now(KYIV_TZ)
-    # Кешуємо gspread клiєнт на 30 хвилин
     if _gspread_client is None or _gspread_client_ts is None or             (now - _gspread_client_ts).total_seconds() > 1800:
         creds_dict = json.loads(GOOGLE_CREDS)
-        scopes = [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive",
-        ]
+        scopes = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-        _gspread_client    = gspread.authorize(creds)
+        _gspread_client = gspread.authorize(creds)
         _gspread_client_ts = now
-
-    # Retry з паузою при 429
     for attempt in range(3):
         try:
             return _gspread_client.open_by_key(SPREADSHEET_ID)
         except gspread.exceptions.APIError as e:
-            if '429' in str(e) and attempt < 2:
-                wait = 10 * (attempt + 1)
-                logger.warning("Google Sheets 429, чекаємо %ds (спроба %d)", wait, attempt+1)
-                _time.sleep(wait)
+            if "429" in str(e) and attempt < 2:
+                _time.sleep(10 * (attempt + 1))
             else:
                 raise
-
-
-_DRIVERS_CACHE: Dict[str, Dict] = {}
-_DRIVERS_CACHE_TS: Optional[datetime] = None
-
-
-def _load_drivers_cache() -> None:
-    global _DRIVERS_CACHE, _DRIVERS_CACHE_TS
-    now = datetime.now(KYIV_TZ)
-    if _DRIVERS_CACHE_TS and (now - _DRIVERS_CACHE_TS).total_seconds() < 300:  # 5 хв
-        return
-    try:
-        creds_dict = json.loads(GOOGLE_CREDS)
-        scopes     = ["https://spreadsheets.google.com/feeds",
-                      "https://www.googleapis.com/auth/drive"]
-        creds      = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-        client = gspread.authorize(creds)
-        # Retry при 429
-        import time as _time
-        for _attempt in range(3):
-            try:
-                sp = client.open_by_key(DRIVERS_SPREADSHEET_ID)
-                break
-            except gspread.exceptions.APIError as _e:
-                if '429' in str(_e) and _attempt < 2:
-                    _time.sleep(10 * (_attempt + 1))
-                else:
-                    raise
-        ws         = None
-        for sheet in sp.worksheets():
-            if "ТО" in sheet.title or "грм" in sheet.title.lower():
-                ws = sheet
-                break
-        if not ws:
-            ws = sp.sheet1
-        cache = {}
-        all_rows = ws.get_all_values()
-        logger.info("Drivers sheet: %d rows, first row: %s", len(all_rows), all_rows[0][:3] if all_rows else [])
-        for row in all_rows[2:]:  # пропускаємо 2 рядки заголовкiв
-            if not row or not str(row[0]).strip():
-                continue
-            key    = re.sub(r"[^0-9]", "", str(row[0]).strip())
-            name   = str(row[11]).strip() if len(row) > 11 else ""
-            phone1 = str(row[12]).strip() if len(row) > 12 else ""
-            phone2 = str(row[13]).strip() if len(row) > 13 else ""
-            if key:
-                cache[key] = {"name": name, "phone1": phone1, "phone2": phone2}
-                if name or phone1:
-                    logger.debug("Driver: key=%s name=%s phone=%s", key, name, phone1)
-        logger.info("Drivers cache loaded: %d entries", len(cache))
-        _DRIVERS_CACHE    = cache
-        _DRIVERS_CACHE_TS = now
-    except Exception as e:
-        logger.error("_load_drivers_cache: %s", e)
-
-
-def fmt_driver(car_id: str) -> str:
-    _load_drivers_cache()
-    info   = _DRIVERS_CACHE.get(car_id, {})
-    name   = info.get("name", "").strip()
-    phone1 = info.get("phone1", "").strip()
-    phone2 = info.get("phone2", "").strip()
-    if not name and not phone1:
-        return "Немає водiя"
-    phones = " / ".join(p for p in [phone1, phone2] if p)
-    parts  = []
-    if name:   parts.append(name)
-    if phones: parts.append(phones)
-    return " | ".join(parts)
 
 
 def get_matching_worksheet(spreadsheet, car_id: str):
@@ -276,7 +265,6 @@ def normalize_date_short(date_str: Optional[str]) -> str:
 def parse_short_date(date_str) -> Optional[date]:
     if not date_str:
         return None
-    # Handle datetime/date objects from openpyxl
     if hasattr(date_str, 'date'):
         return date_str.date()
     if isinstance(date_str, date):
@@ -284,14 +272,12 @@ def parse_short_date(date_str) -> Optional[date]:
     s = str(date_str).strip()
     if not s or s in ('None', ''):
         return None
-    # Try ISO format first (from openpyxl string conversion)
     if 'T' in s or (len(s) > 8 and '-' in s[:8]):
         try:
             return datetime.fromisoformat(s.split(' ')[0].split('T')[0]).date()
         except Exception:
             pass
-    for fmt in ("%d.%m.%Y", "%d.%m.%y", "%d-%m-%Y", "%d-%m-%y",
-                "%Y-%m-%d", "%Y.%m.%d"):
+    for fmt in ("%d.%m.%Y", "%d.%m.%y", "%d-%m-%Y", "%d-%m-%y", "%Y-%m-%d", "%Y.%m.%d"):
         try:
             return datetime.strptime(s, fmt).date()
         except ValueError:
@@ -595,35 +581,29 @@ def heuristic_multi_parse(text: str) -> Optional[List[dict]]:
 # ===== Reports: current odometer and service blocks =====
 
 def get_current_odometer_from_rows(rows: List[List[str]]) -> Optional[int]:
-    # Беремо одометр з останньої за ДАТОЮ записi.
-    # Колонка F (витрати) та L (доходи) порiвнюємо по датi — перемагає пiзнiша.
     latest_f: Optional[Tuple[date, int]] = None
     latest_l: Optional[Tuple[date, int]] = None
 
     for r in rows[7:]:
         if len(r) > 5:
-            d   = parse_short_date(r[4] if len(r) > 4 else None)
-            odo = parse_num(r[5])
+            d = parse_short_date(r[4] if len(r) > 4 else None)
+            odo = parse_num(r[5] if len(r) > 5 else None)
             if d and odo is not None and odo > 1000:
                 if latest_f is None or d > latest_f[0] or (d == latest_f[0] and odo > latest_f[1]):
                     latest_f = (d, odo)
         if len(r) > 11:
-            d   = parse_short_date(r[10] if len(r) > 10 else None)
-            odo = parse_num(r[11])
+            d = parse_short_date(r[10] if len(r) > 10 else None)
+            odo = parse_num(r[11] if len(r) > 11 else None)
             if d and odo is not None and odo > 1000:
                 if latest_l is None or d > latest_l[0] or (d == latest_l[0] and odo > latest_l[1]):
                     latest_l = (d, odo)
 
     if latest_f and latest_l:
-        if latest_f[0] > latest_l[0]:
-            return latest_f[1]
-        if latest_l[0] > latest_f[0]:
-            return latest_l[1]
+        if latest_f[0] > latest_l[0]: return latest_f[1]
+        if latest_l[0] > latest_f[0]: return latest_l[1]
         return max(latest_f[1], latest_l[1])
-    if latest_f:
-        return latest_f[1]
-    if latest_l:
-        return latest_l[1]
+    if latest_f: return latest_f[1]
+    if latest_l: return latest_l[1]
     return None
 
 
@@ -667,26 +647,15 @@ def split_expense_blocks(rows: List[List[str]]) -> List[List[Dict[str, Any]]]:
 def score_oil_block(block: List[Dict[str, Any]]) -> int:
     text = " | ".join(x["desc"] for x in block)
     score = 0
-    # Сильнi маркери (однозначно замiна масла)
-    if "масло в двигатель" in text:
-        score += 10
-    if "моторное масло" in text:
-        score += 8
-    if "замена масла" in text:
-        score += 8
-    if "замiна масла" in text:
-        score += 8
-    if "масло в двигун" in text:
-        score += 8
-    if "моторне масло" in text:
-        score += 8
-    # Слабкi маркери
-    if "масляный фильтр" in text:
-        score += 4
-    if "масляний фiльтр" in text:
-        score += 4
-    if "масло" in text:
-        score += 2
+    if "масло в двигатель" in text: score += 10
+    if "моторное масло" in text:    score += 8
+    if "замена масла" in text:      score += 8
+    if "замiна масла" in text:      score += 8
+    if "масло в двигун" in text:    score += 8
+    if "моторне масло" in text:     score += 8
+    if "масляный фильтр" in text:   score += 4
+    if "масляний фiльтр" in text:   score += 4
+    if "масло" in text:             score += 2
     return score
 
 
@@ -715,7 +684,7 @@ def find_last_service(rows: List[List[str]], mode: str) -> Tuple[Optional[str], 
 
     scorer = score_oil_block if mode == "oil" else score_grm_block
     for block in reversed(blocks):
-        if scorer(block) >= (8 if mode == "oil" else 8):
+        if scorer(block) >= 8:
             return block[0]["date"], block[0]["odo"]
     return None, None
 
@@ -816,13 +785,11 @@ def build_insurance_report() -> str:
         if not rows:
             continue
 
-        # Спочатку шукаємо в A4 (рядок 4, iндекс 3)
         best: Optional[Tuple[date, str]] = None
         if len(rows) > 3 and rows[3] and rows[3][0]:
             d, company = parse_insurance_a4(rows[3][0])
             if d:
                 best = (d, company)
-        # Якщо в A4 немає — шукаємо в колонках R/S
         if not best:
             for row in rows[7:]:
                 if len(row) >= INSURANCE_COMPANY_COL:
@@ -848,20 +815,19 @@ async def check_service_and_insurance_notifications(context: ContextTypes.DEFAUL
         return
     logger.info("Running daily notification check...")
     try:
-        await _run_notifications(context)
+        await _run_notify(context)
     except Exception as e:
-        logger.error("Notify top-level error: %s", e, exc_info=True)
-        for user_id in ALLOWED_USERS:
+        logger.error("Notify error: %s", e, exc_info=True)
+        for uid in ALLOWED_USERS:
             try:
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=f"⚠️ Помилка при формуваннi регламентiв: {e}")
+                await context.bot.send_message(chat_id=uid, text=f"⚠️ Помилка регламентiв: {e}")
             except Exception:
                 pass
 
 
-async def _run_notifications(context: ContextTypes.DEFAULT_TYPE):
+async def _run_notify(context: ContextTypes.DEFAULT_TYPE):
     now_kyiv = datetime.now(KYIV_TZ)
+
     snapshot = get_data_snapshot(force_refresh=True)
     today = now_kyiv.date()
     alert_items: List[Tuple[int, str]] = []
@@ -881,13 +847,10 @@ async def _run_notifications(context: ContextTypes.DEFAULT_TYPE):
         if oil_odo is not None and current_odo is not None:
             remaining = 10000 - (max(current_odo, oil_odo) - oil_odo)
             if remaining <= 1000:
-                icon = "🔴" if remaining <= 0 else "🟠"
-                drv = fmt_driver(car_id)
-                drv_line = f"\n    👤 {drv}"
                 if remaining < 0:
-                    alert_items.append((remaining, f"{icon} {car_id} — масло прострочено на {format_km(abs(remaining))} км{drv_line}"))
+                    alert_items.append((remaining, f"🚗 {car_id} — масло прострочено на {format_km(abs(remaining))} км"))
                 else:
-                    alert_items.append((remaining, f"{icon} {car_id} — масло через {format_km(remaining)} км{drv_line}"))
+                    alert_items.append((remaining, f"🚗 {car_id} — масло через {format_km(remaining)} км"))
 
         if car_id not in SKIP_GRM:
             grm_date, grm_odo = find_last_service(rows, "grm")
@@ -902,7 +865,6 @@ async def _run_notifications(context: ContextTypes.DEFAULT_TYPE):
                     else:
                         alert_items.append((remaining, f"{icon} {car_id} — ГРМ через {format_km(remaining)} км{drv_line}"))
 
-        # Спочатку шукаємо в A4
         best: Optional[Tuple[date, str]] = None
         if len(rows) > 3 and rows[3] and rows[3][0]:
             d, company = parse_insurance_a4(rows[3][0])
@@ -920,12 +882,13 @@ async def _run_notifications(context: ContextTypes.DEFAULT_TYPE):
             end_date, company = best
             days_left = (end_date - today).days
             if days_left <= 14:
+                ins_icon = "🔴" if days_left < 0 else "🟠"
                 if days_left < 0:
-                    alert_items.append((days_left, f"🚗 {car_id} — страховка прострочена на {abs(days_left)} дн. ({company})"))
+                    alert_items.append((days_left, f"{ins_icon} {car_id} — страховка прострочена на {abs(days_left)} дн. ({company})"))
                 else:
-                    alert_items.append((days_left, f"🚗 {car_id} — страховка через {days_left} дн. ({company})"))
+                    alert_items.append((days_left, f"{ins_icon} {car_id} — страховка через {days_left} дн. ({company})"))
 
-    logger.info("Notify: %d alert items found", len(alert_items))
+    logger.info("Notify: %d alerts", len(alert_items))
     if alert_items:
         alert_items.sort(key=lambda x: x[0])
         text = "⚠️ Стан регламентiв на сьогоднi:\n\n" + "\n".join(msg for _, msg in alert_items)
@@ -936,7 +899,7 @@ async def _run_notifications(context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error("Notification send error: %s", e)
     else:
-        logger.info("Notify: no alerts today, message not sent")
+        logger.info("Notify: no alerts today")
 
 
 # ===== USD rate =====
@@ -1511,39 +1474,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cur_odo = get_current_odometer_from_rows(rows)
                 if cur_odo:
                     lines.append(f"📍 Поточний одометр: {format_km(cur_odo)} км")
-                # Масло
                 _, oil_odo = find_last_service(rows, "oil")
                 if oil_odo and cur_odo:
                     oil_rem = 10000 - (max(cur_odo, oil_odo) - oil_odo)
-                    oil_icon = get_color_icon(oil_rem, 10000)
-                    lines.append(f"{oil_icon} Масло: {format_km(oil_rem)} км до регламенту")
-                # ГРМ
+                    lines.append(f"{get_color_icon(oil_rem, 10000)} Масло: {format_km(oil_rem)} км до регламенту")
                 if car_id not in SKIP_GRM:
                     _, grm_odo = find_last_service(rows, "grm")
                     if grm_odo and cur_odo:
                         grm_rem = 50000 - (max(cur_odo, grm_odo) - grm_odo)
-                        grm_icon = get_color_icon(grm_rem, 50000)
-                        lines.append(f"{grm_icon} ГРМ: {format_km(grm_rem)} км до регламенту")
-                # Страховка
+                        lines.append(f"{get_color_icon(grm_rem, 50000)} ГРМ: {format_km(grm_rem)} км до регламенту")
                 today_d = datetime.now(KYIV_TZ).date()
                 best = None
                 if len(rows) > 3 and rows[3] and rows[3][0]:
                     d, company = parse_insurance_a4(rows[3][0])
-                    if d:
-                        best = (d, company)
+                    if d: best = (d, company)
                 if not best:
                     for row in rows[7:]:
                         if len(row) >= INSURANCE_COMPANY_COL:
                             d = parse_short_date(row[INSURANCE_DATE_COL - 1])
                             company = str(row[INSURANCE_COMPANY_COL - 1]).strip()
                             if d and company:
-                                if best is None or d > best[0]:
-                                    best = (d, company)
+                                if best is None or d > best[0]: best = (d, company)
                 if best:
                     days_left = (best[0] - today_d).days
-                    ins_icon = insurance_days_icon(days_left)
-                    lines.append(f"{ins_icon} Страховка: {best[0].strftime('%d.%m.%y')} ({best[1]})")
-            # Місячна статистика
+                    lines.append(f"{insurance_days_icon(days_left)} Страховка: {best[0].strftime('%d.%m.%y')} ({best[1]})")
             lines.append("")
             lines.append(monthly_summary(car_id))
             await update.message.reply_text("\n".join(lines))
@@ -1662,7 +1616,7 @@ def main():
     app.job_queue.run_daily(
         check_service_and_insurance_notifications,
         time=time(9, 15, tzinfo=KYIV_TZ),
-        days=(0, 1, 2, 3, 4),  # тiльки Пн-Пт
+        days=(0, 1, 2, 3, 4),
         name="weekday_morning_regulations"
     )
     logger.info("Bot started!")

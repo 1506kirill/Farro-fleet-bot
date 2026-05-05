@@ -1251,17 +1251,34 @@ def monthly_summary(car_id: str) -> str:
 
 def is_oil_report_request(text: str) -> bool:
     t = str(text or "").lower().strip()
-    return t in {"масло", "замена масла", "то", "плановое то", "планове то"}
+    if t in {"масло", "замена масла", "то", "плановое то", "планове то"}:
+        return True
+    parts = t.split()
+    if parts and parts[0] in {"масло", "то"}:
+        return True
+    return False
 
 
 def is_grm_report_request(text: str) -> bool:
     t = str(text or "").lower().strip()
-    return t in {"грм", "замена грм", "комплект грм"}
+    if t in {"грм", "замена грм", "комплект грм"}:
+        return True
+    parts = t.split()
+    if parts and parts[0] in {"грм"}:
+        return True
+    return False
 
 
 def is_insurance_report_request(text: str) -> bool:
     t = str(text or "").lower().strip()
-    return t in {"страховка", "страхування", "страховка?"}
+    # Точна команда
+    if t in {"страховка", "страхування", "страховка?"}:
+        return True
+    # "страховка 6514", "страховка по 7121" тощо
+    parts = t.split()
+    if parts and parts[0] in {"страховка", "страхування"}:
+        return True
+    return False
 
 
 # ===== Telegram handlers =====
